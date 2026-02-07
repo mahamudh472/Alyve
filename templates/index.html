@@ -1,0 +1,777 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Realtime Voice (OpenAI Realtime)</title>
+  <style>
+    :root {
+      --background: #ffffff;
+      --foreground: #111111;
+      --primary: #2563eb;
+      --secondary: #4f46e5;
+      --accent: #93c5fd;
+      --backgroundLight: #f3f4f6;
+      --foregroundLight: #374151;
+      --border: #d1d5db;
+      --muted: #6b7280;
+    }
+
+    body { font-family: system-ui, Arial; margin: 18px; background: var(--background); color: var(--foreground); }
+    button { margin-right: 8px; background: var(--primary); color: var(--foreground); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    button:hover:not(:disabled) { filter: brightness(1.05); }
+    #log, #ai, #stt { white-space: pre-wrap; border: 1px solid var(--border); padding: 10px; overflow: auto; background: var(--backgroundLight); color: var(--foregroundLight); border-radius: 12px; }
+    #log { height: 220px; }
+    #stt { height: 80px; margin-top: 10px; }
+    #ai { height: 140px; margin-top: 10px; }
+    .row { display:flex; gap:14px; align-items:center; flex-wrap: wrap; margin-top: 10px; }
+    .pill { border: 1px solid var(--border); padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,0.03); }
+    input[type="range"] { width: 220px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .card { border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-top: 14px; background: rgba(255,255,255,0.02); }
+    textarea { width: min(900px, 100%); height: 110px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; font-family: system-ui, Arial; background: var(--backgroundLight); color: var(--foreground); }
+    .muted { color: var(--muted); font-size: 12px; }
+    #memStatus, #loStatus { margin-left: 8px; }
+    input[type="text"], select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--backgroundLight); color: var(--foreground); }
+  </style>
+
+  <!-- ✅ Crystal Presence theme inlined (no external file needed) -->
+  <script>
+    window.THEMES = window.THEMES || {};
+    window.THEMES["crystal_presence"] = {
+      title: "Crystal Presence",
+      type: "dark",
+      backgroundImage:
+        "https://res.cloudinary.com/dmiycxciu/image/upload/v1769551505/Deep_Black_2_ixsx8w.png",
+      colors: {
+        background: "#0B1220",
+        foreground: "#EAF2FF",
+
+        primary: "#4FA6FF",
+        secondary: "#6E8BFF",
+        accent: "#C6DBFF",
+
+        backgroundLight: "#16223A",
+        foregroundLight: "#BFD9FF",
+
+        border: "#223A5E",
+        muted: "#7FA6CC",
+      },
+    };
+  </script>
+
+  <script>
+    window.APP_CONFIG = window.APP_CONFIG || {
+      API_BASE: "/api",
+      WS_PATH: "/ws/voice/",
+      PCM_CHANNELS: 1,
+      VOICE_DEBUG: true,
+      PLAYBACK_GAIN: 1.6,
+      HARD_RESET_ON_DELTA: false,
+    };
+  </script>
+
+  <script>
+    // Apply Crystal Presence theme
+    (function () {
+      const theme = window.THEMES && window.THEMES["crystal_presence"];
+      if (!theme) return;
+
+      const root = document.documentElement;
+      const c = theme.colors || {};
+      root.style.setProperty("--background", c.background || "#0B1220");
+      root.style.setProperty("--foreground", c.foreground || "#EAF2FF");
+      root.style.setProperty("--primary", c.primary || "#4FA6FF");
+      root.style.setProperty("--secondary", c.secondary || "#6E8BFF");
+      root.style.setProperty("--accent", c.accent || "#C6DBFF");
+      root.style.setProperty("--backgroundLight", c.backgroundLight || "#16223A");
+      root.style.setProperty("--foregroundLight", c.foregroundLight || "#BFD9FF");
+      root.style.setProperty("--border", c.border || "#223A5E");
+      root.style.setProperty("--muted", c.muted || "#7FA6CC");
+
+      if (theme.backgroundImage) {
+        document.body.style.backgroundImage = `url(${theme.backgroundImage})`;
+        document.body.style.backgroundSize = "cover";
+        document.body.style.backgroundAttachment = "fixed";
+        document.body.style.backgroundRepeat = "no-repeat";
+      }
+    })();
+  </script>
+</head>
+
+<body>
+  <h2>Realtime Voice (OpenAI Realtime)</h2>
+
+  <div class="row">
+    <label class="pill">Profile ID: <input id="profileId" value="default" /></label>
+
+    <label class="pill">
+      Loved One:
+      <select id="lovedOneSelect"></select>
+    </label>
+
+    <button id="btnReloadLO">Reload Loved Ones</button>
+    <span id="loStatus" class="mono muted"></span>
+  </div>
+
+  <div class="card">
+    <h3 style="margin: 0 0 8px 0;">Create Loved One</h3>
+    <div class="muted" style="margin-bottom: 10px;">
+      Saved on backend. Later, frontend selects it and backend loads persona automatically.
+    </div>
+    <div class="row">
+      <label class="pill">Name: <input id="loName" type="text" placeholder="Grandpa Joe" /></label>
+      <label class="pill">Relationship: <input id="loRel" type="text" placeholder="my grandpa" /></label>
+      <label class="pill">Call me: <input id="loNick" type="text" placeholder="champ / sweetheart" /></label>
+    </div>
+    <div class="row">
+      <label class="pill" style="flex: 1; min-width: 320px;">
+        Speaking style:
+        <input id="loStyle" type="text" style="width: min(520px, 100%);" placeholder="warm, gentle, kind" />
+      </label>
+      <button id="btnCreateLO">Save Loved One</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <label class="pill">
+      VAD silence (ms):
+      <input id="silenceMs" type="range" min="120" max="800" step="10" value="220" />
+      <span id="silenceVal" class="mono">220</span>
+    </label>
+
+    <label class="pill">
+      VAD threshold:
+      <input id="vadThr" type="range" min="0.2" max="0.9" step="0.01" value="0.55" />
+      <span id="thrVal" class="mono">0.55</span>
+    </label>
+
+    <label class="pill">
+      <input id="ptt" type="checkbox" />
+      Push-to-talk (hold space)
+    </label>
+
+    <div class="pill">Mic level: <span id="lvl" class="mono">0.000</span></div>
+    <div class="pill">State: <span id="state" class="mono">idle</span></div>
+  </div>
+
+  <div class="row">
+    <button id="btnStart">Start</button>
+    <button id="btnStop" disabled>Stop</button>
+    <button id="btnCut">Cut AI Audio</button>
+  </div>
+
+  <div class="card">
+    <h3 style="margin: 0 0 8px 0;">Add RAG Memory (Text)</h3>
+    <div class="muted" style="margin-bottom: 8px;">
+      Saves memory for the selected Loved One and indexes it in vector DB.
+    </div>
+    <textarea id="memText" placeholder="Example: I always called you ‘champ’ and loved fishing trips..."></textarea>
+    <div class="row" style="margin-top: 10px;">
+      <button id="btnAddMem">Add Memory</button>
+      <span id="memStatus" class="mono muted"></span>
+    </div>
+  </div>
+
+  <h3>Events</h3>
+  <div id="log"></div>
+
+  <h3>STT Text</h3>
+  <div id="stt"></div>
+
+  <h3>AI Text</h3>
+  <div id="ai"></div>
+
+<script>
+(() => {
+  const logEl = document.getElementById("log");
+  const sttEl = document.getElementById("stt");
+  const aiEl  = document.getElementById("ai");
+
+  const btnStart = document.getElementById("btnStart");
+  const btnStop  = document.getElementById("btnStop");
+  const btnCut   = document.getElementById("btnCut");
+
+  const silenceMs = document.getElementById("silenceMs");
+  const vadThr = document.getElementById("vadThr");
+  const silenceVal = document.getElementById("silenceVal");
+  const thrVal = document.getElementById("thrVal");
+  const ptt = document.getElementById("ptt");
+  const lvlEl = document.getElementById("lvl");
+  const stateEl = document.getElementById("state");
+
+  const profileIdEl = document.getElementById("profileId");
+
+  const lovedOneSelect = document.getElementById("lovedOneSelect");
+  const btnReloadLO = document.getElementById("btnReloadLO");
+  const loStatus = document.getElementById("loStatus");
+
+  const loNameEl = document.getElementById("loName");
+  const loRelEl  = document.getElementById("loRel");
+  const loNickEl = document.getElementById("loNick");
+  const loStyleEl= document.getElementById("loStyle");
+  const btnCreateLO = document.getElementById("btnCreateLO");
+
+  const memTextEl = document.getElementById("memText");
+  const btnAddMem = document.getElementById("btnAddMem");
+  const memStatus = document.getElementById("memStatus");
+
+  const API_BASE = window.APP_CONFIG?.API_BASE || "/api";
+  const WS_PATH  = window.APP_CONFIG?.WS_PATH  || "/ws/voice/";
+
+  const PCM_CHANNELS = parseInt(window.APP_CONFIG?.PCM_CHANNELS || 1, 10);
+  const VOICE_DEBUG = !!window.APP_CONFIG?.VOICE_DEBUG;
+  const PLAYBACK_GAIN = Number(window.APP_CONFIG?.PLAYBACK_GAIN ?? 1.6);
+  const HARD_RESET_ON_DELTA = !!window.APP_CONFIG?.HARD_RESET_ON_DELTA;
+
+  let ws = null;
+
+  // audio in
+  let micStream = null;
+  let audioCtxIn = null;
+  let sourceNode = null;
+  let procNode = null;
+  let micZeroGain = null;
+
+  // audio out (ring buffer)
+  let audioCtxOut = null;
+  let outProc = null;
+  let outGain = null;
+
+  // make IN_RATE mutable so backend can set the true PCM rate
+  let IN_RATE = 24000;
+
+  // ring buffer for float samples (mono)
+  let RB_CAP = 0;
+  let rb = null;
+  let rbW = 0;
+  let rbR = 0;
+  let rbSize = 0;
+
+  // Start playback only after buffered audio available
+  // CHANGED: 0.60 -> 1.20 to reduce underruns / dropped mid-audio
+  const START_BUFFER_SEC = 1.20;
+  let START_BUFFER_SAMPLES = 0;
+  let playbackStarted = false;
+
+  // --- ADDED LOGGING STATE (safe, no behavior change) ---
+  let rbOverflowCount = 0;
+  let rbDroppedSamples = 0;
+  let rbFirstOverflowTs = 0;
+  let rbLastOverflowTs = 0;
+  let rbLastLogTs = 0;
+  // -----------------------------------------------------
+
+  let aiBuf = "";
+  let pttDownLocal = false;
+  let pcmLoggedOnce = false;
+
+  function log(s) {
+    logEl.textContent += s + "\n";
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setState(s) { stateEl.textContent = s; }
+
+  function selectedLovedOneId() {
+    const v = lovedOneSelect.value;
+    return v ? parseInt(v, 10) : 0;
+  }
+
+  async function reloadLovedOnes() {
+    const profile_id = (profileIdEl.value || "default").trim();
+    loStatus.textContent = "Loading…";
+    lovedOneSelect.innerHTML = "";
+    try {
+      const res = await fetch(`${API_BASE}/lovedone/list/?profile_id=${encodeURIComponent(profile_id)}`);
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || "Request failed");
+      const items = j.items || [];
+      for (const it of items) {
+        const opt = document.createElement("option");
+        opt.value = it.id;
+        opt.textContent = `${it.name || "(no name)"} — ${it.relationship || "relationship"}`;
+        lovedOneSelect.appendChild(opt);
+      }
+      loStatus.textContent = items.length ? `Loaded ${items.length}` : "No loved ones yet";
+    } catch (e) {
+      loStatus.textContent = "Error: " + (e?.message || e);
+    }
+  }
+
+  btnReloadLO.addEventListener("click", reloadLovedOnes);
+  profileIdEl.addEventListener("change", reloadLovedOnes);
+
+  btnCreateLO.addEventListener("click", async () => {
+    const profile_id = (profileIdEl.value || "default").trim();
+    const payload = {
+      profile_id,
+      name: (loNameEl.value || "").trim(),
+      relationship: (loRelEl.value || "").trim(),
+      nickname_for_user: (loNickEl.value || "").trim(),
+      speaking_style: (loStyleEl.value || "").trim(),
+    };
+    loStatus.textContent = "Saving…";
+    try {
+      const res = await fetch(`${API_BASE}/lovedone/create/`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || "Request failed");
+      loStatus.textContent = `Saved ✅ (id=${j.loved_one_id})`;
+      await reloadLovedOnes();
+      lovedOneSelect.value = String(j.loved_one_id);
+    } catch (e) {
+      loStatus.textContent = "Error: " + (e?.message || e);
+    }
+  });
+
+  silenceMs.addEventListener("input", () => {
+    silenceVal.textContent = silenceMs.value;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "session.config",
+        vad_silence_ms: parseInt(silenceMs.value, 10),
+        vad_threshold: parseFloat(vadThr.value),
+        ptt_enabled: !!ptt.checked
+      }));
+    }
+  });
+
+  vadThr.addEventListener("input", () => {
+    thrVal.textContent = vadThr.value;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "session.config",
+        vad_silence_ms: parseInt(silenceMs.value, 10),
+        vad_threshold: parseFloat(vadThr.value),
+        ptt_enabled: !!ptt.checked
+      }));
+    }
+  });
+
+  ptt.addEventListener("change", () => {
+    pttDownLocal = false;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "session.config",
+        vad_silence_ms: parseInt(silenceMs.value, 10),
+        vad_threshold: parseFloat(vadThr.value),
+        ptt_enabled: !!ptt.checked
+      }));
+    }
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (!ptt.checked) return;
+    if (e.code === "Space") {
+      e.preventDefault();
+      if (!pttDownLocal) pttDownLocal = true;
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ptt.down" }));
+    }
+  });
+
+  window.addEventListener("keyup", (e) => {
+    if (!ptt.checked) return;
+    if (e.code === "Space") {
+      e.preventDefault();
+      pttDownLocal = false;
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ptt.up" }));
+    }
+  });
+
+  function b64ToU8(b64) {
+    const bin = atob(b64);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
+  }
+
+  function pcm16ToFloat32(u8, channels = 1) {
+    const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    if (u8.byteLength < 2) return new Float32Array(0);
+
+    if (channels === 2) {
+      const samples = Math.floor(u8.byteLength / 2);
+      const frames = Math.floor(samples / 2);
+      const f32 = new Float32Array(frames);
+      for (let i = 0; i < frames; i++) {
+        const l = view.getInt16((i * 4) + 0, true);
+        const r = view.getInt16((i * 4) + 2, true);
+        f32[i] = ((l + r) * 0.5) / 32768.0;
+      }
+      return f32;
+    }
+
+    const f32 = new Float32Array(Math.floor(u8.byteLength / 2));
+    for (let i = 0; i < f32.length; i++) {
+      const s = view.getInt16(i * 2, true);
+      f32[i] = s / 32768.0;
+    }
+    return f32;
+  }
+
+  function float32ToPCM16(float32) {
+    const buf = new ArrayBuffer(float32.length * 2);
+    const view = new DataView(buf);
+    for (let i = 0; i < float32.length; i++) {
+      let s = Math.max(-1, Math.min(1, float32[i]));
+      s = s < 0 ? s * 32768 : s * 32767;
+      view.setInt16(i * 2, s, true);
+    }
+    return new Uint8Array(buf);
+  }
+
+  function resampleLinear(input, inRate, outRate) {
+    if (!input || input.length === 0) return new Float32Array(0);
+    if (inRate === outRate) return input;
+
+    const ratio = outRate / inRate;
+    const outLen = Math.max(1, Math.floor(input.length * ratio));
+    const out = new Float32Array(outLen);
+
+    for (let i = 0; i < outLen; i++) {
+      const srcPos = i / ratio;
+      const j = Math.floor(srcPos);
+      const t = srcPos - j;
+      const a = input[j] ?? 0;
+      const b = input[Math.min(j + 1, input.length - 1)] ?? 0;
+      out[i] = a + (b - a) * t;
+    }
+    return out;
+  }
+
+  function ensureAudioOut() {
+    if (audioCtxOut) return;
+
+    audioCtxOut = new (window.AudioContext || window.webkitAudioContext)();
+    log("Playback audio context ready. sampleRate=" + audioCtxOut.sampleRate);
+
+    outGain = audioCtxOut.createGain();
+    outGain.gain.value = (Number.isFinite(PLAYBACK_GAIN) ? PLAYBACK_GAIN : 1.6);
+    outGain.connect(audioCtxOut.destination);
+
+    const OUT_RATE = audioCtxOut.sampleRate;
+
+    // ✅ CHANGED: 6s -> 30s buffer (prevents overwriting the beginning of assistant speech)
+    RB_CAP = OUT_RATE * 60;
+    console.log("[RB] init cap_samples=", RB_CAP, "cap_sec=", (RB_CAP / OUT_RATE).toFixed(1));
+
+    rb = new Float32Array(RB_CAP);
+    rbW = 0; rbR = 0; rbSize = 0;
+    playbackStarted = false;
+    START_BUFFER_SAMPLES = Math.floor(START_BUFFER_SEC * OUT_RATE);
+
+    // reset overflow counters on fresh audio context start
+    rbOverflowCount = 0;
+    rbDroppedSamples = 0;
+    rbFirstOverflowTs = 0;
+    rbLastOverflowTs = 0;
+    rbLastLogTs = 0;
+
+    outProc = audioCtxOut.createScriptProcessor(2048, 0, 1);
+    outProc.onaudioprocess = (e) => {
+      const out = e.outputBuffer.getChannelData(0);
+
+      if (!playbackStarted) {
+        if (rbSize >= START_BUFFER_SAMPLES) playbackStarted = true;
+        else {
+          out.fill(0);
+          return;
+        }
+      }
+
+      for (let i = 0; i < out.length; i++) {
+        if (rbSize > 0) {
+          out[i] = rb[rbR];
+          rbR = (rbR + 1) % RB_CAP;
+          rbSize--;
+        } else {
+          out[i] = 0;
+        }
+      }
+
+      // periodic debug log (max every ~2s)
+      if (VOICE_DEBUG) {
+        const now = performance.now();
+        if (now - rbLastLogTs > 2000) {
+          rbLastLogTs = now;
+          const secBuffered = (audioCtxOut ? (rbSize / audioCtxOut.sampleRate) : 0);
+          console.log("[RB] size=", rbSize, "cap=", RB_CAP, "buffered_sec=", secBuffered.toFixed(2),
+                      "overflows=", rbOverflowCount, "dropped_samples=", rbDroppedSamples);
+        }
+      }
+    };
+
+    outProc.connect(outGain);
+  }
+
+  function rbClear() {
+    rbW = 0; rbR = 0; rbSize = 0;
+    playbackStarted = false;
+  }
+
+  function stopPlayback() {
+    rbClear();
+    log("Playback stopped/cleared.");
+  }
+
+  // ✅ CHANGED: if buffer is full, drop NEW samples (preserve old / beginning of speech)
+  function rbWriteFloat32(f32) {
+    if (!f32 || f32.length === 0) return;
+
+    for (let i = 0; i < f32.length; i++) {
+      if (rbSize >= RB_CAP) {
+        rbOverflowCount++;
+        rbDroppedSamples += (f32.length - i);
+
+        const now = performance.now();
+        if (!rbFirstOverflowTs) rbFirstOverflowTs = now;
+        rbLastOverflowTs = now;
+
+        // log once per overflow burst
+        if (VOICE_DEBUG) {
+          console.warn("[RB] OVERFLOW: dropping NEW audio samples",
+                       { overflowCount: rbOverflowCount, droppedSamples: rbDroppedSamples, rbSize, RB_CAP });
+        }
+        return; // drop the rest of this chunk
+      }
+
+      rb[rbW] = f32[i];
+      rbW = (rbW + 1) % RB_CAP;
+      rbSize++;
+    }
+  }
+
+  function handleEvent(msg) {
+    const t = msg.type;
+
+    if (t !== "ai.text.delta") {
+      const label =
+        (t === "event" && msg.name)
+          ? (msg.name === "openai.event" && msg.openai_type
+              ? `event:${msg.name}(${msg.openai_type})`
+              : `event:${msg.name}`)
+          : t;
+
+      if (t === "event" && (msg.name === "tts.pcm.stats" || msg.name === "tts.elevenlabs.cfg")) {
+        log("EVENT: " + label + " " + JSON.stringify(msg));
+      } else {
+        log("EVENT: " + label + (msg.note ? (" | " + msg.note) : ""));
+      }
+    }
+
+    if (t === "event" && msg.name === "tts.elevenlabs.cfg") {
+      const r = parseInt(msg.pcm_rate || 0, 10);
+      if (r && Number.isFinite(r) && r >= 8000 && r <= 96000) {
+        IN_RATE = r;
+        log("Set IN_RATE from backend = " + IN_RATE);
+      }
+      return;
+    }
+
+    if (t === "stt.text") { sttEl.textContent = msg.text || ""; return; }
+    if (t === "ai.text.start") { aiBuf = ""; aiEl.textContent = ""; return; }
+    if (t === "ai.text.delta") { aiBuf += (msg.delta || ""); aiEl.textContent = aiBuf; return; }
+    if (t === "ai.text.final") { aiEl.textContent = (msg.text || aiBuf || ""); return; }
+
+    if (t === "rt.audio.delta") {
+      const b64 = msg.audio_b64 || "";
+      if (!b64) return;
+
+      ensureAudioOut();
+
+      const u8 = b64ToU8(b64);
+
+      if (VOICE_DEBUG && !pcmLoggedOnce) {
+        pcmLoggedOnce = true;
+        const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+        const first10 = [];
+        for (let i = 0; i < 10 && (i * 2 + 1) < u8.byteLength; i++) {
+          first10.push(dv.getInt16(i * 2, true));
+        }
+        console.log("PCM first10 int16:", first10, "bytes:", u8.byteLength, "channelsAssumed:", PCM_CHANNELS, "IN_RATE:", IN_RATE);
+      }
+
+      if (HARD_RESET_ON_DELTA) stopPlayback();
+
+      const monoIn = pcm16ToFloat32(u8, PCM_CHANNELS);
+      const outRate = audioCtxOut.sampleRate;
+      const monoOut = resampleLinear(monoIn, IN_RATE, outRate);
+
+      rbWriteFloat32(monoOut);
+      return;
+    }
+
+    if (t === "ai.interrupt") {
+      // ✅ existing behavior: hard-stop current playback so there's no overlap
+      stopPlayback();
+      return;
+    }
+  }
+
+  async function startMic() {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      }
+    });
+
+    audioCtxIn = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    log("Input AudioContext sampleRate=" + audioCtxIn.sampleRate);
+
+    sourceNode = audioCtxIn.createMediaStreamSource(micStream);
+
+    procNode = audioCtxIn.createScriptProcessor(2048, 1, 1);
+    sourceNode.connect(procNode);
+
+    micZeroGain = audioCtxIn.createGain();
+    micZeroGain.gain.value = 0;
+    procNode.connect(micZeroGain);
+    micZeroGain.connect(audioCtxIn.destination);
+
+    procNode.onaudioprocess = (e) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (ptt.checked && !pttDownLocal) return;
+
+      const input = e.inputBuffer.getChannelData(0);
+      let rms = 0;
+      for (let i = 0; i < input.length; i++) rms += input[i] * input[i];
+      rms = Math.sqrt(rms / input.length);
+      lvlEl.textContent = rms.toFixed(3);
+
+      const pcm16 = float32ToPCM16(input);
+      ws.send(pcm16);
+    };
+
+    log("Mic started");
+  }
+
+  function stopMic() {
+    try { if (procNode) procNode.disconnect(); } catch {}
+    try { if (sourceNode) sourceNode.disconnect(); } catch {}
+    try { if (micZeroGain) micZeroGain.disconnect(); } catch {}
+    micZeroGain = null;
+
+    procNode = null; sourceNode = null;
+
+    if (audioCtxIn) { try { audioCtxIn.close(); } catch {} audioCtxIn = null; }
+    if (micStream) { for (const t of micStream.getTracks()) t.stop(); micStream = null; }
+
+    lvlEl.textContent = "0.000";
+    log("Mic stopped");
+  }
+
+  function wsUrl() {
+    const proto = (location.protocol === "https:") ? "wss" : "ws";
+    return `${proto}://${location.host}${WS_PATH}`;
+  }
+
+  function connectWs() {
+    ws = new WebSocket(wsUrl());
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = async () => {
+      log("WS connected ✅");
+      setState("connected");
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+
+      const profile_id = (profileIdEl.value || "default").trim();
+      const loved_one_id = selectedLovedOneId();
+      if (!loved_one_id) {
+        log("ERROR: Select a Loved One first.");
+        ws.close();
+        return;
+      }
+
+      stopPlayback();
+      try {
+        await startMic();
+      } catch (e) {
+        log("ERROR: Mic permission failed: " + (e?.message || e));
+        ws.close();
+        return;
+      }
+
+      const cfg = {
+        profile_id,
+        loved_one_id,
+        vad_silence_ms: parseInt(silenceMs.value, 10),
+        vad_threshold: parseFloat(vadThr.value),
+        ptt_enabled: !!ptt.checked,
+      };
+
+      ws.send(JSON.stringify({ type: "session.start", ...cfg }));
+      log("Sent session.start: " + JSON.stringify(cfg));
+    };
+
+    ws.onmessage = (evt) => {
+      let msg = null;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+      handleEvent(msg);
+    };
+
+    ws.onclose = () => {
+      log("WS closed");
+      setState("closed");
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      stopMic();
+      stopPlayback();
+      ws = null;
+      pttDownLocal = false;
+      pcmLoggedOnce = false;
+    };
+
+    ws.onerror = () => setState("error");
+  }
+
+  btnStart.addEventListener("click", () => {
+    logEl.textContent = "";
+    sttEl.textContent = "";
+    aiEl.textContent  = "";
+    aiBuf = "";
+    pcmLoggedOnce = false;
+    stopPlayback();
+    connectWs();
+  });
+
+  btnStop.addEventListener("click", () => { if (ws) ws.close(); });
+
+  btnCut.addEventListener("click", () => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ai.cut_audio" }));
+  });
+
+  btnAddMem.addEventListener("click", async () => {
+    const profile_id = (profileIdEl.value || "default").trim();
+    const loved_one_id = selectedLovedOneId();
+    const text = (memTextEl.value || "").trim();
+
+    if (!loved_one_id) { memStatus.textContent = "Select a Loved One."; return; }
+    if (!text) { memStatus.textContent = "Please enter memory text."; return; }
+
+    memStatus.textContent = "Saving…";
+    try {
+      const res = await fetch(`${API_BASE}/memory/add/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id, loved_one_id, text }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || "Request failed");
+      memStatus.textContent = "Saved ✅";
+      memTextEl.value = "";
+    } catch (e) {
+      memStatus.textContent = "Error: " + (e?.message || e);
+    }
+  });
+
+  reloadLovedOnes();
+})();
+</script>
+</body>
+</html>

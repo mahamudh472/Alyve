@@ -1,0 +1,123 @@
+# =========================================
+# Python / Django
+# =========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+.python-version
+
+# Django artifacts
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+staticfiles/
+media/
+
+# Migrations (uncomment if you truly don't want them tracked)
+# **/migrations/
+# !**/migrations/__init__.py
+
+# =========================================
+# Environment / secrets
+# =========================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# =========================================
+# IDE / Editor
+# =========================================
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# =========================================
+# Testing / Coverage
+# =========================================
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.cache/
+
+# =========================================
+# Build / Packaging
+# =========================================
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-log.txt
+
+# =========================================
+# Jupyter
+# =========================================
+.ipynb_checkpoints/
+
+# =========================================
+# Frontend / Node (if you later add it)
+# =========================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# =========================================
+# Chroma / Vector DB persistence (your project uses CHROMA_DIR=chroma_db)
+# =========================================
+chroma_db/
+chroma_db*/
+*.sqlite3
+*.db
+
+# =========================================
+# Uploaded audio / temp files
+# =========================================
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.flac
+*.webm
+*.opus
+
+# Temp
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# =========================================
+# Deployment / OS
+# =========================================
+*.pid
+*.pid.lock
+logs/
+
+
+# Raw recordings (local only)
+raw_recording/
+raw_recording/**
