@@ -35,7 +35,6 @@
     input[type="text"], select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--backgroundLight); color: var(--foreground); }
   </style>
 
-  <!-- ✅ Crystal Presence theme inlined (no external file needed) -->
   <script>
     window.THEMES = window.THEMES || {};
     window.THEMES["crystal_presence"] = {
@@ -46,14 +45,11 @@
       colors: {
         background: "#0B1220",
         foreground: "#EAF2FF",
-
         primary: "#4FA6FF",
         secondary: "#6E8BFF",
         accent: "#C6DBFF",
-
         backgroundLight: "#16223A",
         foregroundLight: "#BFD9FF",
-
         border: "#223A5E",
         muted: "#7FA6CC",
       },
@@ -72,7 +68,6 @@
   </script>
 
   <script>
-    // Apply Crystal Presence theme
     (function () {
       const theme = window.THEMES && window.THEMES["crystal_presence"];
       if (!theme) return;
@@ -89,11 +84,19 @@
       root.style.setProperty("--border", c.border || "#223A5E");
       root.style.setProperty("--muted", c.muted || "#7FA6CC");
 
-      if (theme.backgroundImage) {
+      const applyBodyBg = () => {
+        if (!theme.backgroundImage) return;
+        if (!document.body) return;
         document.body.style.backgroundImage = `url(${theme.backgroundImage})`;
         document.body.style.backgroundSize = "cover";
         document.body.style.backgroundAttachment = "fixed";
         document.body.style.backgroundRepeat = "no-repeat";
+      };
+
+      if (document.readyState === "loading") {
+        window.addEventListener("DOMContentLoaded", applyBodyBg, { once: true });
+      } else {
+        applyBodyBg();
       }
     })();
   </script>
@@ -136,8 +139,8 @@
   <div class="row">
     <label class="pill">
       VAD silence (ms):
-      <input id="silenceMs" type="range" min="120" max="800" step="10" value="220" />
-      <span id="silenceVal" class="mono">220</span>
+      <input id="silenceMs" type="range" min="300" max="3000" step="10" value="600" />
+      <span id="silenceVal" class="mono">600</span>
     </label>
 
     <label class="pill">
@@ -149,6 +152,13 @@
     <label class="pill">
       <input id="ptt" type="checkbox" />
       Push-to-talk (hold space)
+    </label>
+
+    <!-- Client-side barge-in threshold (RMS) -->
+    <label class="pill">
+      Barge-in RMS:
+      <input id="bargeInThr" type="range" min="0.005" max="0.12" step="0.001" value="0.080" />
+      <span id="bargeInVal" class="mono">0.040</span>
     </label>
 
     <div class="pill">Mic level: <span id="lvl" class="mono">0.000</span></div>
@@ -200,8 +210,10 @@
   const lvlEl = document.getElementById("lvl");
   const stateEl = document.getElementById("state");
 
-  const profileIdEl = document.getElementById("profileId");
+  const bargeInThr = document.getElementById("bargeInThr");
+  const bargeInVal = document.getElementById("bargeInVal");
 
+  const profileIdEl = document.getElementById("profileId");
   const lovedOneSelect = document.getElementById("lovedOneSelect");
   const btnReloadLO = document.getElementById("btnReloadLO");
   const loStatus = document.getElementById("loStatus");
@@ -226,6 +238,19 @@
 
   let ws = null;
 
+  let interruptGateUntil = 0;
+  let currentAudioGen = 0;
+
+  // Client barge-in tuning
+  const BARGE_IN_HOLD_MS = 180;     // must be above thr for this long
+  const BARGE_IN_COOLDOWN_MS = 700; // after cutting, don't re-trigger immediately
+  const RMS_EMA_ALPHA = 0.35;       // smoothing; higher = more responsive
+
+  let clientBargeInCooldownUntil = 0;
+  let bargeAboveMs = 0;
+  let lastMicFrameTs = 0;
+  let rmsEma = 0;
+
   // audio in
   let micStream = null;
   let audioCtxIn = null;
@@ -238,29 +263,21 @@
   let outProc = null;
   let outGain = null;
 
-  // make IN_RATE mutable so backend can set the true PCM rate
   let IN_RATE = 24000;
 
-  // ring buffer for float samples (mono)
   let RB_CAP = 0;
   let rb = null;
   let rbW = 0;
   let rbR = 0;
   let rbSize = 0;
 
-  // Start playback only after buffered audio available
-  // CHANGED: 0.60 -> 1.20 to reduce underruns / dropped mid-audio
-  const START_BUFFER_SEC = 1.20;
+  const START_BUFFER_SEC = 0.25;
   let START_BUFFER_SAMPLES = 0;
   let playbackStarted = false;
 
-  // --- ADDED LOGGING STATE (safe, no behavior change) ---
   let rbOverflowCount = 0;
   let rbDroppedSamples = 0;
-  let rbFirstOverflowTs = 0;
-  let rbLastOverflowTs = 0;
   let rbLastLogTs = 0;
-  // -----------------------------------------------------
 
   let aiBuf = "";
   let pttDownLocal = false;
@@ -271,6 +288,14 @@
     logEl.scrollTop = logEl.scrollHeight;
   }
   function setState(s) { stateEl.textContent = s; }
+
+  // barge-in label wiring
+  if (bargeInVal && bargeInThr) {
+    bargeInVal.textContent = Number(bargeInThr.value).toFixed(3);
+    bargeInThr.addEventListener("input", () => {
+      bargeInVal.textContent = Number(bargeInThr.value).toFixed(3);
+    });
+  }
 
   function selectedLovedOneId() {
     const v = lovedOneSelect.value;
@@ -327,40 +352,25 @@
     }
   });
 
-  silenceMs.addEventListener("input", () => {
-    silenceVal.textContent = silenceMs.value;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "session.config",
-        vad_silence_ms: parseInt(silenceMs.value, 10),
-        vad_threshold: parseFloat(vadThr.value),
-        ptt_enabled: !!ptt.checked
-      }));
-    }
-  });
+  silenceVal.textContent = silenceMs.value;
+  thrVal.textContent = vadThr.value;
 
-  vadThr.addEventListener("input", () => {
-    thrVal.textContent = vadThr.value;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "session.config",
-        vad_silence_ms: parseInt(silenceMs.value, 10),
-        vad_threshold: parseFloat(vadThr.value),
-        ptt_enabled: !!ptt.checked
-      }));
-    }
-  });
+  function sendCfg() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+      type: "session.config",
+      vad_silence_ms: parseInt(silenceMs.value, 10),
+      vad_threshold: parseFloat(vadThr.value),
+      ptt_enabled: !!ptt.checked
+    }));
+  }
+
+  silenceMs.addEventListener("input", () => { silenceVal.textContent = silenceMs.value; sendCfg(); });
+  vadThr.addEventListener("input", () => { thrVal.textContent = vadThr.value; sendCfg(); });
 
   ptt.addEventListener("change", () => {
     pttDownLocal = false;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "session.config",
-        vad_silence_ms: parseInt(silenceMs.value, 10),
-        vad_threshold: parseFloat(vadThr.value),
-        ptt_enabled: !!ptt.checked
-      }));
-    }
+    sendCfg();
   });
 
   window.addEventListener("keydown", (e) => {
@@ -454,32 +464,23 @@
 
     const OUT_RATE = audioCtxOut.sampleRate;
 
-    // ✅ CHANGED: 6s -> 30s buffer (prevents overwriting the beginning of assistant speech)
     RB_CAP = OUT_RATE * 60;
-    console.log("[RB] init cap_samples=", RB_CAP, "cap_sec=", (RB_CAP / OUT_RATE).toFixed(1));
-
     rb = new Float32Array(RB_CAP);
     rbW = 0; rbR = 0; rbSize = 0;
     playbackStarted = false;
     START_BUFFER_SAMPLES = Math.floor(START_BUFFER_SEC * OUT_RATE);
 
-    // reset overflow counters on fresh audio context start
     rbOverflowCount = 0;
     rbDroppedSamples = 0;
-    rbFirstOverflowTs = 0;
-    rbLastOverflowTs = 0;
     rbLastLogTs = 0;
 
-    outProc = audioCtxOut.createScriptProcessor(2048, 0, 1);
+    outProc = audioCtxOut.createScriptProcessor(1024, 0, 1);
     outProc.onaudioprocess = (e) => {
       const out = e.outputBuffer.getChannelData(0);
 
       if (!playbackStarted) {
         if (rbSize >= START_BUFFER_SAMPLES) playbackStarted = true;
-        else {
-          out.fill(0);
-          return;
-        }
+        else { out.fill(0); return; }
       }
 
       for (let i = 0; i < out.length; i++) {
@@ -492,7 +493,6 @@
         }
       }
 
-      // periodic debug log (max every ~2s)
       if (VOICE_DEBUG) {
         const now = performance.now();
         if (now - rbLastLogTs > 2000) {
@@ -505,6 +505,15 @@
     };
 
     outProc.connect(outGain);
+
+    try { audioCtxOut.resume(); } catch {}
+  }
+
+  async function resumeOutIfNeeded() {
+    if (!audioCtxOut) return;
+    try {
+      if (audioCtxOut.state === "suspended") await audioCtxOut.resume();
+    } catch {}
   }
 
   function rbClear() {
@@ -517,7 +526,6 @@
     log("Playback stopped/cleared.");
   }
 
-  // ✅ CHANGED: if buffer is full, drop NEW samples (preserve old / beginning of speech)
   function rbWriteFloat32(f32) {
     if (!f32 || f32.length === 0) return;
 
@@ -525,23 +533,29 @@
       if (rbSize >= RB_CAP) {
         rbOverflowCount++;
         rbDroppedSamples += (f32.length - i);
-
-        const now = performance.now();
-        if (!rbFirstOverflowTs) rbFirstOverflowTs = now;
-        rbLastOverflowTs = now;
-
-        // log once per overflow burst
         if (VOICE_DEBUG) {
           console.warn("[RB] OVERFLOW: dropping NEW audio samples",
                        { overflowCount: rbOverflowCount, droppedSamples: rbDroppedSamples, rbSize, RB_CAP });
         }
-        return; // drop the rest of this chunk
+        return;
       }
-
       rb[rbW] = f32[i];
       rbW = (rbW + 1) % RB_CAP;
       rbSize++;
     }
+  }
+
+  let _savedGain = null;
+  function hardMuteFor(ms = 180) {
+    if (!outGain) return;
+    if (_savedGain == null) _savedGain = outGain.gain.value;
+    outGain.gain.value = 0.0;
+    setTimeout(() => {
+      if (!outGain) return;
+      const restore = (_savedGain == null) ? (Number.isFinite(PLAYBACK_GAIN) ? PLAYBACK_GAIN : 1.6) : _savedGain;
+      outGain.gain.value = restore;
+      _savedGain = null;
+    }, ms);
   }
 
   function handleEvent(msg) {
@@ -554,12 +568,7 @@
               ? `event:${msg.name}(${msg.openai_type})`
               : `event:${msg.name}`)
           : t;
-
-      if (t === "event" && (msg.name === "tts.pcm.stats" || msg.name === "tts.elevenlabs.cfg")) {
-        log("EVENT: " + label + " " + JSON.stringify(msg));
-      } else {
-        log("EVENT: " + label + (msg.note ? (" | " + msg.note) : ""));
-      }
+      log("EVENT: " + label + (msg.note ? (" | " + msg.note) : ""));
     }
 
     if (t === "event" && msg.name === "tts.elevenlabs.cfg") {
@@ -572,15 +581,45 @@
     }
 
     if (t === "stt.text") { sttEl.textContent = msg.text || ""; return; }
-    if (t === "ai.text.start") { aiBuf = ""; aiEl.textContent = ""; return; }
+
+    if (t === "ai.text.start") {
+      const msgGen = (msg.gen === undefined || msg.gen === null) ? null : Number(msg.gen);
+      if (msgGen !== null && Number.isFinite(msgGen)) currentAudioGen = msgGen;
+      else currentAudioGen++;
+
+      aiBuf = "";
+      aiEl.textContent = "";
+
+      // DO NOT stop playback here
+      interruptGateUntil = 0;
+      return;
+    }
+
     if (t === "ai.text.delta") { aiBuf += (msg.delta || ""); aiEl.textContent = aiBuf; return; }
     if (t === "ai.text.final") { aiEl.textContent = (msg.text || aiBuf || ""); return; }
 
+    if (t === "ai.interrupt") {
+      const msgGen = (msg.gen === undefined || msg.gen === null) ? null : Number(msg.gen);
+      if (msgGen !== null && Number.isFinite(msgGen)) currentAudioGen = msgGen;
+      else currentAudioGen++;
+
+      interruptGateUntil = performance.now() + 600;
+      hardMuteFor(250);
+      stopPlayback();
+      return;
+    }
+
     if (t === "rt.audio.delta") {
+      if (performance.now() < interruptGateUntil) return;
+
+      const msgGen = (msg.gen === undefined || msg.gen === null) ? null : Number(msg.gen);
+      if (msgGen !== null && msgGen !== currentAudioGen) return;
+
       const b64 = msg.audio_b64 || "";
       if (!b64) return;
 
       ensureAudioOut();
+      resumeOutIfNeeded();
 
       const u8 = b64ToU8(b64);
 
@@ -588,9 +627,7 @@
         pcmLoggedOnce = true;
         const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
         const first10 = [];
-        for (let i = 0; i < 10 && (i * 2 + 1) < u8.byteLength; i++) {
-          first10.push(dv.getInt16(i * 2, true));
-        }
+        for (let i = 0; i < 10 && (i * 2 + 1) < u8.byteLength; i++) first10.push(dv.getInt16(i * 2, true));
         console.log("PCM first10 int16:", first10, "bytes:", u8.byteLength, "channelsAssumed:", PCM_CHANNELS, "IN_RATE:", IN_RATE);
       }
 
@@ -604,9 +641,9 @@
       return;
     }
 
-    if (t === "ai.interrupt") {
-      // ✅ existing behavior: hard-stop current playback so there's no overlap
-      stopPlayback();
+    if (t === "rt.audio.end") {
+      const msgGen = (msg.gen === undefined || msg.gen === null) ? null : Number(msg.gen);
+      if (msgGen !== null && msgGen !== currentAudioGen) return;
       return;
     }
   }
@@ -625,7 +662,7 @@
 
     sourceNode = audioCtxIn.createMediaStreamSource(micStream);
 
-    procNode = audioCtxIn.createScriptProcessor(2048, 1, 1);
+    procNode = audioCtxIn.createScriptProcessor(1024, 1, 1);
     sourceNode.connect(procNode);
 
     micZeroGain = audioCtxIn.createGain();
@@ -633,15 +670,51 @@
     procNode.connect(micZeroGain);
     micZeroGain.connect(audioCtxIn.destination);
 
+    lastMicFrameTs = performance.now();
+    rmsEma = 0;
+    bargeAboveMs = 0;
+
     procNode.onaudioprocess = (e) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (ptt.checked && !pttDownLocal) return;
 
       const input = e.inputBuffer.getChannelData(0);
+
+      // RMS
       let rms = 0;
       for (let i = 0; i < input.length; i++) rms += input[i] * input[i];
       rms = Math.sqrt(rms / input.length);
-      lvlEl.textContent = rms.toFixed(3);
+
+      // smooth RMS (EMA) to suppress spikes
+      rmsEma = (rmsEma === 0) ? rms : (RMS_EMA_ALPHA * rms + (1 - RMS_EMA_ALPHA) * rmsEma);
+
+      lvlEl.textContent = rmsEma.toFixed(3);
+
+      // ---- client-side barge-in (noise-resistant) ----
+      const now = performance.now();
+      const dtMs = Math.max(0, Math.min(100, now - lastMicFrameTs));
+      lastMicFrameTs = now;
+
+      const thr = Number(bargeInThr?.value || 0);
+      const ttsIsPlaying = playbackStarted && rbSize > 0;
+
+      if (ttsIsPlaying && thr > 0 && now >= clientBargeInCooldownUntil) {
+        if (rmsEma >= thr) bargeAboveMs += dtMs;
+        else bargeAboveMs = Math.max(0, bargeAboveMs - dtMs * 1.2); // decay fast when below
+
+        if (bargeAboveMs >= BARGE_IN_HOLD_MS) {
+          clientBargeInCooldownUntil = now + BARGE_IN_COOLDOWN_MS;
+          bargeAboveMs = 0;
+
+          try { ws.send(JSON.stringify({ type: "ai.cut_audio" })); } catch {}
+          hardMuteFor(220);
+          stopPlayback();
+          log(`CLIENT BARGE-IN: ema=${rmsEma.toFixed(3)} thr=${thr.toFixed(3)} hold=${BARGE_IN_HOLD_MS}ms -> sent ai.cut_audio`);
+        }
+      } else {
+        bargeAboveMs = 0;
+      }
+      // ---- end barge-in ----
 
       const pcm16 = float32ToPCM16(input);
       ws.send(pcm16);
@@ -725,18 +798,37 @@
       ws = null;
       pttDownLocal = false;
       pcmLoggedOnce = false;
+      interruptGateUntil = 0;
+      currentAudioGen = 0;
+
+      clientBargeInCooldownUntil = 0;
+      bargeAboveMs = 0;
+      lastMicFrameTs = 0;
+      rmsEma = 0;
     };
 
     ws.onerror = () => setState("error");
   }
 
-  btnStart.addEventListener("click", () => {
+  btnStart.addEventListener("click", async () => {
     logEl.textContent = "";
     sttEl.textContent = "";
     aiEl.textContent  = "";
     aiBuf = "";
     pcmLoggedOnce = false;
+    interruptGateUntil = 0;
+    currentAudioGen = 0;
+
+    clientBargeInCooldownUntil = 0;
+    bargeAboveMs = 0;
+    lastMicFrameTs = 0;
+    rmsEma = 0;
+
     stopPlayback();
+
+    ensureAudioOut();
+    await resumeOutIfNeeded();
+
     connectWs();
   });
 

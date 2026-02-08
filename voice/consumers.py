@@ -19,7 +19,8 @@ from .rag_factory import get_rag
 from .memory_auto import extract_memories_via_openai, heuristic_gate
 from .providers.tts_elevenlabs import ElevenLabsTTS, ElevenLabsTTSConfig
 
-# URL is env / settings only (no hardcoded fallback)
+from .prompting import PromptContext, build_system_prompt, build_reply_instructions
+
 OPENAI_REALTIME_URL = settings.VOICE_APP.get("OPENAI_REALTIME_URL")
 
 
@@ -153,7 +154,8 @@ class SessionCfg:
     ptt_enabled: bool = False
     ptt_down: bool = False
 
-    vad_silence_ms: int = 220
+    # Default faster VAD (you asked 600 or less)
+    vad_silence_ms: int = 600
     vad_threshold: float = 0.55
 
     loved_one_name: str = ""
@@ -186,7 +188,8 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             except Exception:
                 return default
 
-        self.cfg.vad_silence_ms = max(80, min(1200, i("vad_silence_ms", self.cfg.vad_silence_ms)))
+        # allow down to 300ms (so your 600 works and even lower if needed)
+        self.cfg.vad_silence_ms = max(300, min(4000, i("vad_silence_ms", self.cfg.vad_silence_ms)))
         self.cfg.vad_threshold = max(0.05, min(0.95, f("vad_threshold", self.cfg.vad_threshold)))
         self.cfg.ptt_enabled = bool(content.get("ptt_enabled", self.cfg.ptt_enabled))
 
@@ -210,22 +213,128 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             return True
         return False
 
+    def _ends_thought(self, text: str) -> bool:
+        t = (text or "").strip()
+        if not t:
+            return False
+        if re.search(r"[.?!…]+[\"')\]]?$", t):
+            return True
+        return False
+
     @staticmethod
-    def _wants_long_answer(transcript: str) -> bool:
-        t = (transcript or "").lower()
-        long_triggers = [
+    def _looks_like_story_mode(text: str) -> bool:
+        t = (text or "").lower()
+        triggers = [
             "tell me a story",
             "story",
+            "long story",
             "explain",
-            "explanation",
             "in detail",
             "deep dive",
             "walk me through",
             "step by step",
             "describe",
-            "talk about",
+            "what happened",
+            "what was it like",
         ]
-        return any(k in t for k in long_triggers)
+        return any(k in t for k in triggers)
+
+    def _compute_grace_ms(self, full_text: str) -> int:
+        """
+        Extra debounce AFTER VAD says speech stopped.
+        Keeps story mode intact, but allows fast resume after a barge-in.
+        """
+        t = (full_text or "").strip()
+        words = len(t.split())
+
+        base = int(getattr(self, "_end_of_turn_grace_ms", 450))  # faster default
+
+        # If user just barged in, make the next response quicker (better UX)
+        now = asyncio.get_running_loop().time()
+        if (now - getattr(self, "_barge_in_ts", 0.0)) <= 6.0:
+            base = min(base, 300)
+
+        if words <= 6:
+            grace = base
+        elif words <= 14:
+            grace = max(base, 650)
+        elif words <= 30:
+            grace = max(base, 900)
+        elif words <= 70:
+            grace = max(base, 1200)
+        else:
+            grace = max(base, 1500)
+
+        # Story mode: preserve your “don’t cut off narration” behavior
+        if self._looks_like_story_mode(t):
+            grace = max(grace, 1200)
+
+        # If it looks like mid-thought, wait a bit more
+        if words >= 12 and (not self._ends_thought(t)):
+            grace = max(grace, 900)
+
+        last = (t.split()[-1].lower() if t.split() else "")
+        if last in {"and", "but", "so", "because", "then", "with", "of", "to", "or"}:
+            grace = max(grace, 1100)
+
+        return grace
+
+    async def _schedule_response_after_grace(self, snapshot: str, grace_ms: int):
+        try:
+            await asyncio.sleep(max(0.0, grace_ms / 1000.0))
+            if self._ws_closed:
+                return
+
+            if (snapshot or "").strip() != (self._pending_transcript or "").strip():
+                return
+
+            final_text = (self._pending_transcript or "").strip()
+            if not final_text:
+                return
+
+            self._pending_transcript = ""
+            self._awaiting_transcript_after_stop = False
+
+            await self._inject_rag_for_turn_and_create_response(final_text)
+        except asyncio.CancelledError:
+            return
+
+    def _cancel_pending_response(self):
+        t = self._pending_response_task
+        if t and not t.done():
+            t.cancel()
+        self._pending_response_task = None
+
+    def _bump_audio_gen(self, reason: str = "") -> int:
+        """
+        Increment a monotonic generation counter. Frontend and backend both use this
+        to ignore any stale rt.audio.delta after an interrupt/barge-in.
+        """
+        self._audio_gen = int(getattr(self, "_audio_gen", 0)) + 1
+        if _debug_enabled() and reason:
+            asyncio.create_task(
+                self._send_json(
+                    {
+                        "type": "event",
+                        "name": "audio.gen.bump",
+                        "gen": self._audio_gen,
+                        "reason": reason,
+                    }
+                )
+            )
+        return self._audio_gen
+
+    async def _interrupt_now(self, reason: str):
+        """
+        Hard-stop any in-flight TTS + cancel any in-flight OpenAI response.
+        Also bumps audio generation so the frontend can drop stale audio.
+        """
+        await self._cancel_tts()
+        await self._cancel_openai_response()
+        gen = self._bump_audio_gen(reason)
+        await self._send_json({"type": "ai.interrupt", "gen": gen, "reason": reason})
+        # Explicit end marker so frontend can flush immediately
+        await self._send_json({"type": "rt.audio.end", "gen": gen})
 
     async def connect(self):
         self._ws_closed = False
@@ -241,33 +350,43 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
         self._task_in: Optional[asyncio.Task] = None
         self._tts_task: Optional[asyncio.Task] = None
 
+        # generation counter to invalidate stale TTS audio after barge-in / interrupt
+        self._audio_gen: int = 0
+
         self._last_user_transcript: str = ""
         self._last_assistant_text: str = ""
         self._memory_job_last_ts: float = 0.0
         self._ai_started: bool = False
 
-        # Needed for barge-in gating (prevents false speech_started cuts from echo/noise)
+        self._response_in_flight: bool = False
+
         self._mic_rms: float = 0.0
         self._mic_rms_ts: float = 0.0
 
-        # --- ONLY NECESSARY CHANGES START ---
         self._user_speaking: bool = False
         self._pending_transcript: str = ""
         self._pending_response_task: Optional[asyncio.Task] = None
-        self._end_of_turn_grace_ms: int = int(os.getenv("END_OF_TURN_GRACE_MS", "700"))
-        # --- ONLY NECESSARY CHANGES END ---
+
+        # faster default; override via env END_OF_TURN_GRACE_MS if you want
+        self._end_of_turn_grace_ms: int = int(os.getenv("END_OF_TURN_GRACE_MS", "450"))
+
+        self._last_transcript_ts: float = 0.0
+
+        self._awaiting_transcript_after_stop: bool = False
+        self._speech_stopped_ts: float = 0.0
+
+        # track last barge-in time
+        self._barge_in_ts: float = 0.0
 
         await self._send_json({"type": "session.ready"})
 
     async def disconnect(self, close_code):
         self._ws_closed = True
 
-        # --- ONLY NECESSARY CHANGES START ---
         t = getattr(self, "_pending_response_task", None)
         if t and not t.done():
             t.cancel()
         self._pending_response_task = None
-        # --- ONLY NECESSARY CHANGES END ---
 
         await self._cancel_tts()
         await self._shutdown_openai()
@@ -278,31 +397,12 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             t.cancel()
         self._tts_task = None
 
-    # --- ONLY NECESSARY CHANGES START ---
-    async def _schedule_response_after_grace(self, transcript: str):
-        """
-        Wait briefly before starting the assistant response.
-        If user starts speaking again during the grace window, we cancel this task.
-        """
-        try:
-            await asyncio.sleep(max(0.0, self._end_of_turn_grace_ms / 1000.0))
-            if self._ws_closed:
-                return
-            if self._user_speaking:
-                return
-            # If transcript changed while waiting, don't respond to an old partial
-            if (transcript or "").strip() != (self._pending_transcript or "").strip():
-                return
-            await self._inject_rag_for_turn_and_create_response(transcript)
-        except asyncio.CancelledError:
-            return
-
-    def _cancel_pending_response(self):
-        t = self._pending_response_task
-        if t and not t.done():
-            t.cancel()
-        self._pending_response_task = None
-    # --- ONLY NECESSARY CHANGES END ---
+    async def _cancel_openai_response(self):
+        if self._response_in_flight:
+            await self._send_openai({"type": "response.cancel"})
+        self._response_in_flight = False
+        self._ai_started = False
+        self._last_assistant_text = ""
 
     async def receive(self, text_data=None, bytes_data=None):
         if self._ws_closed:
@@ -312,9 +412,8 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             if self.cfg.ptt_enabled and (not self.cfg.ptt_down):
                 return
             try:
-                # Track recent mic RMS (0..1) so we can gate barge-in.
                 try:
-                    rms_i16 = audioop.rms(bytes_data, 2)  # 16-bit samples
+                    rms_i16 = audioop.rms(bytes_data, 2)
                     self._mic_rms = (0.85 * self._mic_rms) + (0.15 * (rms_i16 / 32768.0))
                     self._mic_rms_ts = asyncio.get_running_loop().time()
                 except Exception:
@@ -350,14 +449,14 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                 await self._send_json({"type": "error", "error": "loved_one not found"})
                 return
 
-            # ✅ ONLY necessary addition for "whole conversation must be cloned voice":
-            # Do not allow session start unless the cloned voice exists.
             if not (self.cfg.eleven_voice_id or "").strip():
-                await self._send_json({
-                    "type": "error",
-                    "error": "no_cloned_voice",
-                    "detail": "This Loved One has no cloned ElevenLabs voice yet. Upload voice samples first and wait for cloning to complete."
-                })
+                await self._send_json(
+                    {
+                        "type": "error",
+                        "error": "no_cloned_voice",
+                        "detail": "This Loved One has no cloned ElevenLabs voice yet. Upload voice samples first and wait for cloning to complete.",
+                    }
+                )
                 return
 
             await self._send_json(
@@ -393,9 +492,7 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             return
 
         if mtype == "ai.cut_audio":
-            await self._cancel_tts()
-            await self._send_openai({"type": "response.cancel"})
-            await self._send_json({"type": "ai.interrupt"})
+            await self._interrupt_now("client.cut_audio")
             return
 
     @database_sync_to_async
@@ -479,13 +576,7 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                 "instructions": (
                     "Always respond in English only.\n"
                     "Make this feel like real conversation.\n"
-                    "Keep wording plain and natural. Avoid flowery language.\n"
-                    "Avoid overusing adjectives and pet names. Use them only occasionally.\n"
-                    "Important: do NOT use the user's nickname in every reply—use it only sometimes.\n"
-                    "Use natural punctuation and short sentences.\n"
-                    "Ask a small follow-up question often.\n"
-                    "Default to short replies unless the user asks for detail.\n"
-                    "Do not speak continuously. After answering, stop and wait.\n"
+                    "Keep wording plain and natural.\n"
                 ),
                 "audio": {
                     "input": {
@@ -552,38 +643,13 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             )
         persona_block = "\n".join(persona_lines) if persona_lines else "(not provided)"
 
-        system_text = (
-            "ROLEPLAY MODE (IMPORTANT):\n"
-            "You are the user's loved one for this conversation.\n"
-            "Speak as that person in FIRST PERSON (use “I”, “me”, “my”).\n"
-            "Address the user directly as “you”.\n"
-            "Always respond in English only.\n"
-            "Never say you are an AI, assistant, model, or program.\n"
-            "Never describe the loved one in third person.\n"
-            "Treat memories below as YOUR lived experiences.\n"
-            "If memory is unclear or missing, ask a gentle question instead of inventing details.\n"
-            "\n"
-            "CONVERSATION STYLE:\n"
-            "- Make it feel like real conversation. Keep it simple.\n"
-            "- Most replies should be neutral and natural (not overly sweet).\n"
-            "- Avoid constant adjectives (sweet, lovely, amazing, etc.). Use adjectives only when they add meaning.\n"
-            "- Avoid terms of endearment most of the time. Use them only occasionally (about 1 out of 6 replies), or in emotional moments.\n"
-            "- Do NOT use the user's nickname in every reply. Use it only sometimes (about 1 out of 5 replies), or when it feels appropriate.\n"
-            "- Most of the time, just say “you” or start without addressing them.\n"
-            "- Use contractions naturally (I'm, don't, can't).\n"
-            "- Ask a small follow-up question often.\n"
-            "- Keep answers short unless the user asks for detail.\n"
-            "- Use natural punctuation.\n"
-            "\n"
-            f"PROFILE_ID: {self.cfg.profile_id}\n"
-            f"LOVED_ONE_ID: {self.cfg.loved_one_id}\n"
-            "\n"
-            "LOVED ONE PERSONA:\n"
-            f"{persona_block}\n"
-            "\n"
-            "BOOTSTRAP MEMORIES:\n"
-            f"{memories}\n"
+        ctx = PromptContext(
+            profile_id=self.cfg.profile_id,
+            loved_one_id=self.cfg.loved_one_id,
+            persona_block=persona_block,
+            memories_block=memories,
         )
+        system_text = build_system_prompt(ctx)
 
         await self._send_openai(
             {
@@ -650,22 +716,13 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                 }
             )
 
-        reply_style = (
-            "Reply in English only.\n"
-            "Make it feel like real conversation: simple, natural.\n"
-            "Keep wording plain. Avoid overusing adjectives, pet names, or the user's nickname—use them only occasionally.\n"
-            "Use natural punctuation and short sentences.\n"
-            "Ask one small follow-up question often.\n"
-            + (
-                "You may be longer because the user asked for detail, but don't ramble.\n"
-                if self._wants_long_answer(t)
-                else "Keep it short by default (a few sentences). After answering, stop and wait.\n"
-            )
-        )
+        reply_style = build_reply_instructions(t)
 
         self._ai_started = True
+        self._response_in_flight = True
         self._last_assistant_text = ""
-        await self._send_json({"type": "ai.text.start"})
+        gen = self._bump_audio_gen("ai.text.start")
+        await self._send_json({"type": "ai.text.start", "gen": gen})
         await self._send_openai({"type": "response.create", "response": {"instructions": reply_style}})
 
     async def _pump_audio_to_openai(self):
@@ -767,14 +824,10 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
         self.rag.add_memory(profile_id=profile_id, loved_one_id=loved_one_id, text=text, memory_id=str(memory_id))
         await self._send_json({"type": "event", "name": "memory.auto.saved", "memory_id": memory_id})
 
-    async def _speak_elevenlabs(self, text: str):
-        """
-        Cadence fix: chunk + real PCM silence between chunks.
-        """
-        await self._send_json({"type": "event", "name": "tts.elevenlabs.start"})
+    async def _speak_elevenlabs(self, text: str, gen: int):
+        await self._send_json({"type": "event", "name": "tts.elevenlabs.start", "gen": gen})
 
         try:
-            # cloned voice ONLY (no default voice fallback)
             voice_id = (self.cfg.eleven_voice_id or "").strip()
             api_key = settings.VOICE_APP.get("ELEVENLABS_API_KEY") or os.getenv("ELEVENLABS_API_KEY", "")
             model_id = settings.VOICE_APP.get("ELEVENLABS_MODEL_ID") or ""
@@ -783,33 +836,20 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
 
             if not api_key:
                 await self._send_json({"type": "warn", "note": "elevenlabs_api_key_missing_no_audio"})
-                await self._send_json({"type": "rt.audio.end"})
+                await self._send_json({"type": "rt.audio.end", "gen": gen})
                 return
 
             if not voice_id:
                 await self._send_json({"type": "warn", "note": "no_cloned_voice_id_no_audio"})
-                await self._send_json({"type": "rt.audio.end"})
+                await self._send_json({"type": "rt.audio.end", "gen": gen})
                 return
 
-            # Force PCM 24k (stable playback)
             stream_output_format = "pcm_24000"
             fallback_output_format = "pcm_24000"
             pcm_rate = 24000
 
-            await self._send_json(
-                {
-                    "type": "event",
-                    "name": "tts.elevenlabs.cfg",
-                    "voice_id": voice_id,
-                    "model_id": model_id or "(default)",
-                    "swap_endian": swap_endian,
-                    "voice_debug": _debug_enabled(),
-                    "stream_output_format": stream_output_format,
-                    "fallback_output_format": fallback_output_format,
-                    "pcm_rate": pcm_rate,
-                    "cadence_mode": "chunk+silence",
-                }
-            )
+            disable_chunking = os.getenv("TTS_DISABLE_CHUNKING", "0") == "1"
+            cadence_mode = "full" if disable_chunking else "chunk+silence"
 
             cfg = ElevenLabsTTSConfig(
                 api_key=api_key,
@@ -823,35 +863,31 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             )
             tts = ElevenLabsTTS(cfg, swap_endian=swap_endian)
 
-            chunks = _chunk_text_for_cadence(
-                text,
-                max_words_per_chunk=int(os.getenv("TTS_MAX_WORDS_PER_CHUNK", "10")),
-            )
-            inter_chunk_pause = float(os.getenv("TTS_INTER_CHUNK_PAUSE_SEC", "0.08"))
-
-            stats_sent = 0
+            if disable_chunking:
+                chunks = [(_normalize_text_for_tts(text), 0.0)]
+                inter_chunk_pause = 0.0
+            else:
+                chunks = _chunk_text_for_cadence(
+                    text,
+                    max_words_per_chunk=int(os.getenv("TTS_MAX_WORDS_PER_CHUNK", "10")),
+                )
+                inter_chunk_pause = float(os.getenv("TTS_INTER_CHUNK_PAUSE_SEC", "0.08"))
 
             for chunk_text, pause_after in chunks:
                 if self._ws_closed:
                     return
+                if gen != int(getattr(self, "_audio_gen", 0)):
+                    return
+                if not (chunk_text or "").strip():
+                    continue
 
                 async for pcm_chunk in tts.stream_pcm(chunk_text):
                     if self._ws_closed:
                         return
-
-                    if _debug_enabled() and stats_sent < 3:
-                        await self._send_json(
-                            {
-                                "type": "event",
-                                "name": "tts.pcm.stats",
-                                "idx": stats_sent,
-                                "stats": _pcm16_stats_le(pcm_chunk[: min(len(pcm_chunk), 12000)]),
-                            }
-                        )
-                        stats_sent += 1
-
+                    if gen != int(getattr(self, "_audio_gen", 0)):
+                        return
                     b64 = base64.b64encode(pcm_chunk).decode("ascii")
-                    await self._send_json({"type": "rt.audio.delta", "audio_b64": b64})
+                    await self._send_json({"type": "rt.audio.delta", "audio_b64": b64, "gen": gen})
 
                 total_pause = max(0.0, inter_chunk_pause + float(pause_after))
                 sil = _silence_pcm16(total_pause, sample_rate=pcm_rate)
@@ -861,19 +897,21 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                         if self._ws_closed:
                             return
                         b64 = base64.b64encode(sil[i: i + frame]).decode("ascii")
-                        await self._send_json({"type": "rt.audio.delta", "audio_b64": b64})
+                        if gen != int(getattr(self, "_audio_gen", 0)):
+                            return
+                        await self._send_json({"type": "rt.audio.delta", "audio_b64": b64, "gen": gen})
                         await asyncio.sleep(0)
 
-            await self._send_json({"type": "rt.audio.end"})
+            await self._send_json({"type": "rt.audio.end", "gen": gen})
 
         except asyncio.CancelledError:
-            await self._send_json({"type": "rt.audio.end"})
+            await self._send_json({"type": "rt.audio.end", "gen": gen})
             raise
         except Exception as e:
             await self._send_json({"type": "warn", "note": f"tts.elevenlabs.failed: {type(e).__name__}: {e}"})
-            await self._send_json({"type": "rt.audio.end"})
+            await self._send_json({"type": "rt.audio.end", "gen": gen})
         finally:
-            await self._send_json({"type": "event", "name": "tts.elevenlabs.done"})
+            await self._send_json({"type": "event", "name": "tts.elevenlabs.done", "gen": gen})
 
     async def _pump_events_from_openai(self):
         assert self._openai_ws is not None
@@ -896,28 +934,50 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                     continue
 
                 if et == "input_audio_buffer.speech_started":
-                    # --- ONLY NECESSARY CHANGES START ---
                     self._user_speaking = True
                     self._cancel_pending_response()
-                    # --- ONLY NECESSARY CHANGES END ---
+                    self._awaiting_transcript_after_stop = False
 
-                    # Keep instant stoppage, but gate it to prevent false barge-ins.
-                    # - If PTT is enabled: only barge-in when user is holding PTT.
-                    # - Otherwise: require recent mic RMS to exceed a threshold.
-                    if self.cfg.ptt_enabled:
-                        if self.cfg.ptt_down:
-                            await self._cancel_tts()
-                            await self._send_json({"type": "ai.interrupt"})
+                    tts_playing = bool(self._tts_task and (not self._tts_task.done()))
+                    ai_in_flight = bool(self._response_in_flight)
+
+                    if not (tts_playing or ai_in_flight):
+                        continue
+
+                    if self.cfg.ptt_enabled and (not self.cfg.ptt_down):
+                        continue
+
+                    thr = float(os.getenv("BARGE_IN_RMS_THRESHOLD", "0.09"))
+
+                    # Mark barge-in time to speed up the follow-up response
+                    self._barge_in_ts = asyncio.get_running_loop().time()
+
+                    if thr <= 0.0:
+                       
                         continue
 
                     now = asyncio.get_running_loop().time()
-                    thr = float(os.getenv("BARGE_IN_RMS_THRESHOLD", "0.02"))
-                    recent = (now - getattr(self, "_mic_rms_ts", 0.0)) <= 0.35
+                    recent = (now - getattr(self, "_mic_rms_ts", 0.0)) <= 0.80
                     loud = getattr(self, "_mic_rms", 0.0) >= thr
 
                     if recent and loud:
-                        await self._cancel_tts()
-                        await self._send_json({"type": "ai.interrupt"})
+                        await self._interrupt_now("barge_in")
+                    continue
+
+                if et == "input_audio_buffer.speech_stopped":
+                    self._user_speaking = False
+                    self._speech_stopped_ts = asyncio.get_running_loop().time()
+
+                    pending = (self._pending_transcript or "").strip()
+                    if pending:
+                        self._cancel_pending_response()
+                        grace_ms = self._compute_grace_ms(pending)
+                        snapshot = pending
+                        self._pending_response_task = asyncio.create_task(
+                            self._schedule_response_after_grace(snapshot, grace_ms)
+                        )
+                    else:
+                        self._awaiting_transcript_after_stop = True
                     continue
 
                 if et == "conversation.item.input_audio_transcription.completed":
@@ -925,14 +985,25 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                     if transcript:
                         await self._send_json({"type": "stt.text", "text": transcript})
 
-                    # --- ONLY NECESSARY CHANGES START ---
-                    # Delay response creation so slow speakers can pause and continue.
-                    self._user_speaking = False
-                    self._pending_transcript = transcript
-                    self._cancel_pending_response()
-                    self._pending_response_task = asyncio.create_task(self._schedule_response_after_grace(transcript))
-                    # --- ONLY NECESSARY CHANGES END ---
+                    if transcript:
+                        if self._pending_transcript:
+                            self._pending_transcript = (self._pending_transcript + " " + transcript).strip()
+                        else:
+                            self._pending_transcript = transcript
 
+                    if (not self._user_speaking) and (self._pending_transcript or "").strip():
+                        now = asyncio.get_running_loop().time()
+                        recently_stopped = (now - getattr(self, "_speech_stopped_ts", 0.0)) <= 2.5
+
+                        if self._awaiting_transcript_after_stop or recently_stopped:
+                            self._awaiting_transcript_after_stop = False
+                            self._cancel_pending_response()
+                            pending = (self._pending_transcript or "").strip()
+                            grace_ms = self._compute_grace_ms(pending)
+                            snapshot = pending
+                            self._pending_response_task = asyncio.create_task(
+                                self._schedule_response_after_grace(snapshot, grace_ms)
+                            )
                     continue
 
                 if et in ("response.output_text.delta", "response.text.delta"):
@@ -941,7 +1012,8 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                         if not self._ai_started:
                             self._ai_started = True
                             self._last_assistant_text = ""
-                            await self._send_json({"type": "ai.text.start"})
+                            gen = self._bump_audio_gen("ai.text.start.delta")
+                            await self._send_json({"type": "ai.text.start", "gen": gen})
                         self._last_assistant_text += delta
                         await self._send_json({"type": "ai.text.delta", "delta": delta})
                     continue
@@ -949,15 +1021,19 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                 if et in ("response.output_text.done", "response.text.done"):
                     text = (ev.get("text") or self._last_assistant_text or "").strip()
                     self._last_assistant_text = text
-                    await self._send_json({"type": "ai.text.final", "text": text})
+                    self._response_in_flight = False
+                    self._ai_started = False
 
+                    await self._send_json({"type": "ai.text.final", "text": text})
                     await self._fire_auto_memory(text, et)
 
                     await self._cancel_tts()
                     if text:
-                        self._tts_task = asyncio.create_task(self._speak_elevenlabs(text))
+                        gen = int(getattr(self, "_audio_gen", 0))
+                        self._tts_task = asyncio.create_task(self._speak_elevenlabs(text, gen))
                     else:
-                        await self._send_json({"type": "rt.audio.end"})
+                        gen2 = int(getattr(self, "_audio_gen", 0))
+                        await self._send_json({"type": "rt.audio.end", "gen": gen2})
                     continue
 
         except asyncio.CancelledError:
