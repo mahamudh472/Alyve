@@ -58,7 +58,7 @@
 
   <script>
     window.APP_CONFIG = window.APP_CONFIG || {
-      API_BASE: "/api",
+      API_BASE: "/api/v1/voice/",
       WS_PATH: "/ws/voice/",
       PCM_CHANNELS: 1,
       VOICE_DEBUG: true,
@@ -228,7 +228,7 @@
   const btnAddMem = document.getElementById("btnAddMem");
   const memStatus = document.getElementById("memStatus");
 
-  const API_BASE = window.APP_CONFIG?.API_BASE || "/api";
+  const API_BASE = window.APP_CONFIG?.API_BASE || "/api/v1/voice/";
   const WS_PATH  = window.APP_CONFIG?.WS_PATH  || "/ws/voice/";
 
   const PCM_CHANNELS = parseInt(window.APP_CONFIG?.PCM_CHANNELS || 1, 10);
