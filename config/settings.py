@@ -22,7 +22,7 @@ if _allowed.strip():
     ALLOWED_HOSTS = [h.strip() for h in _allowed.split(",") if h.strip()]
 else:
     # safe local defaults
-    ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", '*']
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -31,9 +31,15 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+
+    'accounts',
+    'main',
+
     "rest_framework",
     "channels",
-    "voice",
+    # "voice",
+    'strawberry.django',
+
 ]
 
 MIDDLEWARE = [
@@ -44,6 +50,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "main.middleware.JWTAuthenticationMiddleware"
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -125,6 +132,7 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.JSONRenderer",
     )
 }
+AUTH_USER_MODEL = "accounts.User"
 
 # ----------------------------
 # Voice / AI Settings
