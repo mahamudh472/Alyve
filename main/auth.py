@@ -18,7 +18,7 @@ def get_user_from_token(token: str) -> User:
 
 def get_user_from_refresh_token(token: str):
     try:
-        payload = jswt.deciode(token, settings.SECRET_KEY, algorithms=["HS256"])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
 
         if payload.get("type") != "refresh":
             return None
