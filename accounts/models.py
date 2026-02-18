@@ -2,6 +2,7 @@ from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseU
 from django.db import models
 import uuid
 from django.utils import timezone
+from django.core.exceptions import ValidationError
 
 
 class UserManager(BaseUserManager):
@@ -93,3 +94,9 @@ class SiteSetting(models.Model):
     privacy_policy = models.JSONField(default=dict)     
     terms_of_service = models.JSONField(default=dict)     
     support_email = models.EmailField(blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        """Ensure only one instance of SiteSetting exists"""
+        if not self.pk and SiteSetting.objects.exists():
+            raise ValidationError("Only one SiteSetting instance allowed")
+        return super().save(*args, **kwargs)

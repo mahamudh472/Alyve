@@ -6,6 +6,14 @@ load_dotenv(os.getenv("DOTENV_PATH", ".env"))
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def environment_callback(request):
+    """Returns environment badge for Unfold admin"""
+    if DEBUG:
+        return ["Development", "warning"]
+    return ["Production", "success"]
+
+
 # ----------------------------
 # Core security / environment
 # ----------------------------
@@ -15,16 +23,20 @@ DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
 if not DEBUG and not SECRET_KEY:
     raise RuntimeError("DJANGO_SECRET_KEY must be set in production")
+ALLOWED_HOSTS = ["*"]
+# # Allowed hosts: comma-separated env, e.g. "example.com,api.example.com"
+# _allowed = os.getenv("DJANGO_ALLOWED_HOSTS", "")
+# if _allowed.strip():
+#     ALLOWED_HOSTS = [h.strip() for h in _allowed.split(",") if h.strip()]
+# else:
+#     # safe local defaults
+#     ALLOWED_HOSTS = ["localhost", "127.0.0.1", '*']
 
-# Allowed hosts: comma-separated env, e.g. "example.com,api.example.com"
-_allowed = os.getenv("DJANGO_ALLOWED_HOSTS", "")
-if _allowed.strip():
-    ALLOWED_HOSTS = [h.strip() for h in _allowed.split(",") if h.strip()]
-else:
-    # safe local defaults
-    ALLOWED_HOSTS = ["localhost", "127.0.0.1", '*']
+TRUSTED_ORIGINS = [f"http://{host}" for host in ALLOWED_HOSTS] + [f"https://{host}" for host in ALLOWED_HOSTS]
 
 INSTALLED_APPS = [
+    'unfold',
+    "unfold.contrib.forms",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -41,6 +53,87 @@ INSTALLED_APPS = [
     'strawberry.django',
 
 ]
+
+# ----------------------------
+# Unfold Admin Configuration
+# ----------------------------
+UNFOLD = {
+    "SITE_TITLE": "Alyve Admin",
+    "SITE_HEADER": "Alyve",
+    "SITE_SYMBOL": "memory",  # Material icon
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": True,
+    "THEME": "light",  # Force light mode, disable theme switcher
+    "ENVIRONMENT": "config.settings.environment_callback",
+    "COLORS": {
+        "primary": {
+            "50": "240 249 255",
+            "100": "224 242 254",
+            "200": "186 230 253",
+            "300": "125 211 252",
+            "400": "56 189 248",
+            "500": "14 165 233",
+            "600": "2 132 199",
+            "700": "3 105 161",
+            "800": "7 89 133",
+            "900": "12 74 110",
+            "950": "8 47 73",
+        },
+    },
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": "Dashboard",
+                "separator": True,
+                "items": [
+                    {
+                        "title": "Home",
+                        "icon": "home",
+                        "link": "/admin/",
+                    },
+                ],
+            },
+            {
+                "title": "Users & Auth",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Users",
+                        "icon": "people",
+                        "link": "/admin/accounts/user/",
+                    },
+                ],
+            },
+            {
+                "title": "Voice Companions",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Loved Ones",
+                        "icon": "favorite",
+                        "link": "/admin/voice/lovedone/",
+                    }
+                ],
+            },
+            {
+                "title": "Settings",
+                "separator": True,
+                "collapsible": False,
+                "items": [
+                    {
+                        "title": "Site Settings",
+                        "icon": "settings",
+                        "link": "/admin/accounts/sitesetting/",
+                    },
+                ],
+            },
+        ],
+    },
+}
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

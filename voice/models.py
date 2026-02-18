@@ -10,7 +10,9 @@ class LovedOne(models.Model):
     eleven_voice_id = models.CharField(max_length=128, blank=True, default="")
     catch_phrase = models.CharField(max_length=120, blank=True, null=True)
     description = models.TextField(blank=True, default="")
+    core_memories = models.TextField(blank=True, default="")
     last_conversation_at = models.DateTimeField(blank=True, null=True)
+    voice_file = models.FileField(upload_to="voice_files/", blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -19,24 +21,3 @@ class LovedOne(models.Model):
             models.Index(fields=["created_at"]),
         ]
 
-
-class Memory(models.Model):
-    loved_one = models.ForeignKey(LovedOne, on_delete=models.CASCADE, related_name="memories")
-    text = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["loved_one", "created_at"]),
-        ]
-
-
-class VoiceSample(models.Model):
-    loved_one = models.ForeignKey(LovedOne, on_delete=models.CASCADE, related_name="voice_samples")
-    file = models.FileField(upload_to="voice_samples/")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["loved_one", "created_at"]),
-        ]
