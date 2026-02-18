@@ -1,6 +1,6 @@
 import strawberry
 from .types import (AuthPayload, RefreshPayload, RegisterPayload, VerifyOTPPayload,
-    SentOTPPayload, CheckOTPPayload, ChangePasswordPayload
+    SentOTPPayload, CheckOTPPayload, ChangePasswordPayload, LovedOneType, UserType
 )
 from accounts.models import User, OTP
 from django.contrib.auth import authenticate
@@ -8,6 +8,9 @@ from .utils import generate_access_token, generate_refresh_token, send_otp_email
 from .auth import get_user_from_refresh_token
 from django.utils import timezone
 from graphql import GraphQLError
+from typing import Optional
+from strawberry.file_uploads import Upload
+from voice.models import LovedOne
 
 @strawberry.type
 class Mutation:
@@ -25,6 +28,7 @@ class Mutation:
             return AuthPayload(
                 access_token=access_token, 
                 refresh_token=refresh_token,
+                user=user
             )
         elif user is not None and user.is_active == False:
             raise GraphQLError("Account not activated. Please verify your email.", extensions={"code": "UNAUTHORIZED"})
@@ -71,7 +75,7 @@ class Mutation:
             user.save()
             otp_record.is_used = True
             otp_record.save()
-            return VerifyOTPPayload(success=True, error=None)
+            return VerifyOTPPayload(success=True, user=user)
         except User.DoesNotExist:
             raise GraphQLError("User not found.", extensions={"code": "NOT_FOUND"})
 
@@ -109,3 +113,37 @@ class Mutation:
             return ChangePasswordPayload(success=True)
         except User.DoesNotExist:
             raise GraphQLError("User not found.", extensions={"code": "NOT_FOUND"})
+    @strawberry.field
+    def create_or_update_loved_one(self, info, id: Optional[int] = None, name: Optional[str] = "", relationship: Optional[str] = "", nickname_for_user: Optional[str] = "", description: Optional[str] = "", speaking_style: Optional[str] = "", catch_phrase: Optional[str]="", core_memories: Optional[str]="", voice_file: Optional[Upload] = None ) -> LovedOneType:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        if id is not None:
+            try:
+                loved_one = LovedOne.objects.get(id=id, user=user)
+                loved_one.name = name
+                loved_one.relationship = relationship
+                loved_one.nickname_for_user = nickname_for_user
+                loved_one.description = description
+                loved_one.core_memories = core_memories
+                loved_one.speaking_style = speaking_style
+                loved_one.catch_phrase = catch_phrase
+                loved_one.save()
+                return loved_one
+            except LovedOne.DoesNotExist:
+                raise GraphQLError("Loved one not found", extensions={"code": "NOT_FOUND"})
+        else:
+            loved_one = LovedOne.objects.create(
+                user=user,
+                name=name,
+                relationship=relationship,
+                nickname_for_user=nickname_for_user,
+                description=description,
+                speaking_style=speaking_style,
+                catch_phrase=catch_phrase,
+                core_memories=core_memories
+            )
+            if voice_file is not None:
+                loved_one.voice_file.save(voice_file.name, voice_file)
+                loved_one.save()
+            return loved_one
