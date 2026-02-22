@@ -1,8 +1,10 @@
+from os import wait
 import strawberry
-from .types import MeResponse, LovedOneType, SiteSettingType
+from .types import MeResponse, LovedOneType, SiteSettingType, NotificationType
 from graphql import GraphQLError
 from voice.models import LovedOne
 from typing import Optional
+from accounts.models import SiteSetting, Notification
 
 @strawberry.type
 class Query:
@@ -31,9 +33,14 @@ class Query:
 
     @strawberry.field
     def site_settings(self) -> Optional['SiteSettingType']:
-        from accounts.models import SiteSetting
         try:
             return SiteSetting.objects.first()
         except SiteSetting.DoesNotExist:
             return None
     
+    @strawberry.field
+    def notifications(self, info, limit: int=10, offset: int=0) -> list[NotificationType]:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        return Notification.objects.filter(user=user).order_by("-created_at")[offset:offset+limit]

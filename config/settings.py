@@ -25,7 +25,14 @@ if not DEBUG and not SECRET_KEY:
     raise RuntimeError("DJANGO_SECRET_KEY must be set in production")
 ALLOWED_HOSTS = ["*"]
 
-TRUSTED_ORIGINS = [f"http://{host}" for host in ALLOWED_HOSTS] + [f"https://{host}" for host in ALLOWED_HOSTS]
+# CSRF trustend origins all for now
+CSRF_TRUSTED_ORIGINS = [
+    "http://*",
+    "https://*",
+]
+CSRF_COOKIE_SECURE = False
+SESSION_COOKIE_SECURE = False
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 INSTALLED_APPS = [
     'unfold',

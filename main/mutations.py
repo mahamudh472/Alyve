@@ -1,8 +1,8 @@
 import strawberry
 from .types import (AuthPayload, RefreshPayload, RegisterPayload, VerifyOTPPayload,
-    SentOTPPayload, CheckOTPPayload, ChangePasswordPayload, LovedOneType, UserType
+    SentOTPPayload, CheckOTPPayload, ChangePasswordPayload, LovedOneType, MarkNotificationReadPayload, UserType
 )
-from accounts.models import User, OTP
+from accounts.models import User, OTP, Notification
 from django.contrib.auth import authenticate
 from .utils import generate_access_token, generate_refresh_token, send_otp_email
 from .auth import get_user_from_refresh_token
@@ -147,3 +147,32 @@ class Mutation:
                 loved_one.voice_file.save(voice_file.name, voice_file)
                 loved_one.save()
             return loved_one
+    @strawberry.field
+    def mark_notification_read(self, info, id: int) -> MarkNotificationReadPayload:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        try:
+            notification = Notification.objects.get(id=id, user=user)
+            notification.read = True
+            notification.save()
+            return MarkNotificationReadPayload(success=True)
+        except Notification.DoesNotExist:
+            raise GraphQLError("Notification not found", extensions={"code": "NOT_FOUND"})
+
+    # Update user fullname, avatar, password, push notification preference
+    @strawberry.field
+    def update_profile(self, info, full_name: Optional[str] = None, avatar: Optional[Upload] = None, password: Optional[str] = None, push_notifications_enabled: Optional[bool] = None) -> UserType:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        if full_name is not None:
+            user.full_name = full_name
+        if avatar is not None:
+            user.avatar.save(avatar.name, avatar)
+        if password is not None:
+            user.set_password(password)
+        if push_notifications_enabled is not None:
+            user.push_notifications_enabled = push_notifications_enabled
+        user.save()
+        return user
