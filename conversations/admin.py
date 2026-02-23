@@ -6,9 +6,8 @@ from .models import ConversationSession, ConversationMessage
 
 @admin.register(ConversationSession)
 class ConversationSessionAdmin(ModelAdmin):
-    list_display = ("id", "profile_id", "user", "loved_one", "started_at", "ended_at", "last_activity_at")
-    list_filter = ("started_at", "ended_at")
-    search_fields = ("profile_id", "title", "user__email", "loved_one__name")
+    list_display = ("id", "user", "loved_one", "last_activity_at")
+    search_fields = ("title", "user__email", "loved_one__name")
 
 
 @admin.register(ConversationMessage)

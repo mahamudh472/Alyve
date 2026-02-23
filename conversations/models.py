@@ -17,8 +17,6 @@ class ConversationSession(models.Model):
         related_name="conversation_sessions",
     )
 
-    # Keep profile_id for backward compat / anonymous flows (your project uses profile_id heavily)
-    profile_id = models.CharField(max_length=64, blank=True, default="default")
 
     loved_one = models.ForeignKey(
         "voice.LovedOne",
@@ -26,15 +24,11 @@ class ConversationSession(models.Model):
         related_name="conversation_sessions",
     )
 
-    title = models.CharField(max_length=200, blank=True, default="")
-    started_at = models.DateTimeField(auto_now_add=True)
-    ended_at = models.DateTimeField(null=True, blank=True)
     last_activity_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
-            models.Index(fields=["profile_id", "loved_one"]),
-            models.Index(fields=["started_at"]),
+            models.Index(fields=["loved_one"]),
             models.Index(fields=["last_activity_at"]),
         ]
 

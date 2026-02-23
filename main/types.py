@@ -1,15 +1,23 @@
 import strawberry 
-from accounts.models import User, SiteSetting
+from accounts.models import User, SiteSetting, Notification
 from typing import Optional
 from voice.models import LovedOne
 from strawberry.scalars import JSON
+
+@strawberry.type
+class ImageType:
+    url: str
+    width: Optional[int]
+    height: Optional[int]
 
 @strawberry.django.type(User)
 class UserType:
     id: strawberry.auto
     full_name: strawberry.auto
     email: strawberry.auto
+    avatar: Optional[ImageType]
     is_active: strawberry.auto
+    push_notifications_enabled : strawberry.auto
 
 @strawberry.type
 class MeResponse:
@@ -67,4 +75,15 @@ class SiteSettingType:
     terms_of_service: Optional[JSON]
     support_email: Optional[str]
 
+@strawberry.django.type(Notification)
+class NotificationType:
+    id: strawberry.auto
+    title: strawberry.auto
+    message: strawberry.auto
+    created_at: strawberry.auto
+    read: strawberry.auto
 
+@strawberry.type
+class MarkNotificationReadPayload:
+    success: bool
+    

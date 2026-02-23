@@ -1,7 +1,8 @@
+from os import wait
 from django.contrib import admin
 from unfold.admin import ModelAdmin
 from unfold.decorators import display
-from .models import User, SiteSetting
+from .models import User, SiteSetting, Notification
 from .forms import SiteSettingForm
 
 
@@ -17,6 +18,12 @@ class UserAdmin(ModelAdmin):
     def display_status(self, obj):
         return "Active" if obj.is_active else "Inactive"
 
+@admin.register(Notification)
+class NotificationAdmin(ModelAdmin):
+    list_display = ('user', 'title', 'created_at', 'read')
+    search_fields = ('user__email', 'title', 'message')
+    list_filter = ('read', 'created_at')
+    ordering = ('-created_at',)
 
 @admin.register(SiteSetting)
 class SiteSettingAdmin(ModelAdmin):
