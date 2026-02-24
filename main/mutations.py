@@ -75,7 +75,7 @@ class Mutation:
             user.save()
             otp_record.is_used = True
             otp_record.save()
-            return VerifyOTPPayload(success=True, user=user)
+            return VerifyOTPPayload(success=True, user=user, access_token=generate_access_token(user), refresh_token=generate_refresh_token(user))
         except User.DoesNotExist:
             raise GraphQLError("User not found.", extensions={"code": "NOT_FOUND"})
 

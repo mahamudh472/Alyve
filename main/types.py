@@ -37,6 +37,8 @@ class RegisterPayload:
 class VerifyOTPPayload:
     success: bool
     user: Optional[UserType]
+    access_token: Optional[str]
+    refresh_token: Optional[str]
     
 @strawberry.type
 class RefreshPayload:
