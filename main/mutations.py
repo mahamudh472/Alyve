@@ -75,7 +75,7 @@ class Mutation:
             user.save()
             otp_record.is_used = True
             otp_record.save()
-            return VerifyOTPPayload(success=True, user=user)
+            return VerifyOTPPayload(success=True, user=user, access_token=generate_access_token(user), refresh_token=generate_refresh_token(user))
         except User.DoesNotExist:
             raise GraphQLError("User not found.", extensions={"code": "NOT_FOUND"})
 
@@ -113,8 +113,9 @@ class Mutation:
             return ChangePasswordPayload(success=True)
         except User.DoesNotExist:
             raise GraphQLError("User not found.", extensions={"code": "NOT_FOUND"})
+
     @strawberry.field
-    def create_or_update_loved_one(self, info, id: Optional[int] = None, name: Optional[str] = "", relationship: Optional[str] = "", nickname_for_user: Optional[str] = "", description: Optional[str] = "", speaking_style: Optional[str] = "", catch_phrase: Optional[str]="", core_memories: Optional[str]="", voice_file: Optional[Upload] = None ) -> LovedOneType:
+    def create_or_update_loved_one(self, info, id: Optional[int] = None, name: Optional[str] = None, relationship: Optional[str] = None, nickname_for_user: Optional[str] = None, description: Optional[str] = None, speaking_style: Optional[str] = None, catch_phrase: Optional[str]=None, core_memories: Optional[str]=None, voice_file: Optional[Upload] = None ) -> LovedOneType:
         user = info.context.get("request").user
         if user is None or user.is_anonymous:
            raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
@@ -169,6 +170,7 @@ class Mutation:
         if full_name is not None:
             user.full_name = full_name
         if avatar is not None:
+            print(f"DEBUG avatar type: {type(avatar)}, value: {avatar}")
             user.avatar.save(avatar.name, avatar)
         if password is not None:
             user.set_password(password)

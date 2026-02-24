@@ -3,6 +3,7 @@ from accounts.models import User, SiteSetting, Notification
 from typing import Optional
 from voice.models import LovedOne
 from strawberry.scalars import JSON
+from typing import List
 
 @strawberry.type
 class ImageType:
@@ -37,6 +38,8 @@ class RegisterPayload:
 class VerifyOTPPayload:
     success: bool
     user: Optional[UserType]
+    access_token: Optional[str]
+    refresh_token: Optional[str]
     
 @strawberry.type
 class RefreshPayload:
@@ -68,6 +71,12 @@ class LovedOneType:
     catch_phrase: strawberry.auto
     voice_file: strawberry.auto
     created_at: strawberry.auto
+
+@strawberry.type
+class LovedOnePagination:
+    total_count: int
+    items: List[LovedOneType]
+
 
 @strawberry.django.type(SiteSetting)
 class SiteSettingType:
