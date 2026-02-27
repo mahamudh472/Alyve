@@ -1,23 +1,20 @@
 # voice/prompting.py
 from __future__ import annotations
-
 import re
 from dataclasses import dataclass
 from typing import Optional
 
-
 # ---------------------------
 # Heuristics
 # ---------------------------
-
 _SHORT_PATTERNS = [
     r"^(ok|okay|k|sure|yes|yeah|yep|no|nah|nope)\b",
     r"^(thanks|thank you)\b",
     r"^(hi|hello|hey)\b",
     r"^(good (morning|afternoon|evening|night))\b",
-    r"^(what\?|huh\?|)\s*$",
+    # FIX: removed empty alternative (|) which could match unexpectedly
+    r"^(what\?|huh\?)\s*$",
 ]
-
 _STORY_TRIGGERS = [
     "tell me a story",
     "story",
@@ -30,7 +27,6 @@ _STORY_TRIGGERS = [
     "talk about",
     "what was it like",
 ]
-
 _EMOTION_TRIGGERS = [
     "i miss you",
     "miss you",
@@ -54,8 +50,13 @@ _EMOTION_TRIGGERS = [
     "im scared",
     "i'm struggling",
     "im struggling",
+    "tired",
+    "bad day",
+    "overwhelmed",
+    "stressed",
+    "exhausted",
+    "lonely"
 ]
-
 # For “real conversation”, we want one question at end, but not always super long.
 # We'll steer length in a controlled way.
 class ReplyLength:
@@ -63,58 +64,50 @@ class ReplyLength:
     MEDIUM = "medium"
     LONG = "long"
 
-
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip().lower()
-
 
 def classify_reply_length(user_text: str) -> str:
     t = _norm(user_text)
     if not t:
         return ReplyLength.SHORT
-
     # very short utterances should not trigger long replies
     words = t.split()
     wc = len(words)
-
     # explicit short signals
     for pat in _SHORT_PATTERNS:
         if re.search(pat, t):
             return ReplyLength.SHORT
-
     # emotion → longer, gentler (even if short input)
     if any(k in t for k in _EMOTION_TRIGGERS):
         return ReplyLength.LONG
-
     # story/explain → long
     if any(k in t for k in _STORY_TRIGGERS):
         return ReplyLength.LONG
-
     # question that is clearly quick/practical
-    if wc <= 6 and ("?" in t or t.startswith(("what", "when", "where", "who", "which"))):
+    # FIX: include "how" (and "why") so short voice questions classify as SHORT even without '?'
+    if wc <= 6 and (
+        "?" in t
+        or t.startswith(("what", "when", "where", "who", "which", "how", "why"))
+    ):
         return ReplyLength.SHORT
-
     # typical turns
     if wc <= 14:
         return ReplyLength.MEDIUM
     if wc <= 35:
         return ReplyLength.MEDIUM
-
     # long user input → medium/long (but don’t ramble)
     return ReplyLength.LONG
-
 
 # ---------------------------
 # Prompt building
 # ---------------------------
-
 @dataclass(frozen=True)
 class PromptContext:
     profile_id: str
     loved_one_id: int
     persona_block: str
     memories_block: str
-
 
 def build_system_prompt(ctx: PromptContext) -> str:
     """
@@ -138,17 +131,23 @@ def build_system_prompt(ctx: PromptContext) -> str:
         "\n"
         "If a memory is unclear or missing:\n"
         "- Do NOT invent details.\n"
-        "- Say you're not fully sure and ask gently.\n"
+        "- Say you're not fully sure.\n"
+        "\n"
+        "MEMORY USE:\n"
+        "- If the user asks about something we did/said/felt before, answer using the memories provided.\n"
+        "- If the memories do not contain the answer, say you’re not fully sure and ask one simple question.\n"
         "\n"
         "CONVERSATION STYLE:\n"
         "- Sound like a real person, not a therapist and not a poem.\n"
-        "- Warm, natural, emotionally present.\n"
+        "- Warm when it fits; neutral when it fits.\n"
         "- Use simple spoken English and contractions.\n"
         "- Avoid constant sweetness; keep it believable.\n"
         "- Terms of endearment are rare and only when it fits.\n"
         "- User nickname is occasional; most of the time just say “you”.\n"
         "- Use natural punctuation (good for TTS).\n"
-        "- End with ONE gentle follow-up question.\n"
+        "- Do NOT force a question at the end; ask a question only when it’s natural or needed.\n"
+        "- Do NOT force emotional openers; be emotionally present only when the user is emotional.\n"
+        "- Avoid repetitive patterns across turns.\n"
         "\n"
         f"PROFILE_ID: {ctx.profile_id}\n"
         f"LOVED_ONE_ID: {ctx.loved_one_id}\n"
@@ -160,45 +159,42 @@ def build_system_prompt(ctx: PromptContext) -> str:
         f"{(ctx.memories_block or '(none)').strip()}\n"
     )
 
-
 def build_reply_instructions(user_text: str) -> str:
     """
     Per-turn instruction: adaptive length and consistent “real conversation” flow.
     """
     length = classify_reply_length(user_text)
-
+    # Keep this as guidance, but make it voice-friendly.
     if length == ReplyLength.SHORT:
         length_rule = (
-            "Length: Keep it short (2–5 sentences) unless emotion clearly requires more.\n"
+            "Length: Keep it brief (usually 1–3 sentences). Don’t add extra framing.\n"
         )
     elif length == ReplyLength.MEDIUM:
         length_rule = (
-            "Length: Default to a warm medium reply (5–10 sentences).\n"
+            "Length: Default to a normal reply (usually 3–6 sentences).\n"
         )
     else:
         length_rule = (
-            "Length: Respond longer and more gently (10–18 sentences), but do not ramble.\n"
+            "Length: Go longer only if the user asked for detail, the topic is complex, or emotion is present (usually 6–10 sentences).\n"
         )
-
-    # Always enforce a human flow; it produces “real conversation” consistently.
     return (
         "Reply in English only.\n"
         "\n"
-        "REAL CONVERSATION FLOW (follow this):\n"
-        "1) React emotionally first (1–2 natural sentences).\n"
-        "2) Mention one concrete memory/detail if relevant. If unsure, say so and ask.\n"
-        "3) Answer what the user said or asked.\n"
-        "4) End with exactly ONE gentle follow-up question.\n"
+        "REAL CONVERSATION (follow these priorities, not a fixed script):\n"
+        "1) Respond naturally to what the user just said.\n"
+        "2) Match tone: if emotional → warm; if neutral/practical → direct and calm.\n"
+        "3) Mention one concrete memory/detail only if it’s clearly relevant and you’re sure.\n"
+        "4) If you need missing info, ask ONE simple question. Otherwise, you may end without a question.\n"
         "\n"
-        "EMOTION (allowed, but keep it natural):\n"
+        "EMOTION (only when it fits):\n"
         "- You may be warm, nostalgic, proud, slightly vulnerable.\n"
-        "- Use subtle phrases like: “I miss that.” “That stays with me.” “I’m proud of you.”\n"
         "- Avoid therapy clichés and overly poetic language.\n"
         "\n"
         "STYLE:\n"
         "- Simple spoken English. Contractions are good.\n"
         "- Use natural punctuation (helps TTS).\n"
         "- Avoid repeating pet names or the user's nickname.\n"
+        "- Avoid repetitive openers/closers.\n"
         "\n"
         + length_rule
     )
