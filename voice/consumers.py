@@ -23,9 +23,7 @@ from .prompting import PromptContext, build_system_prompt, build_reply_instructi
 
 # Keep helper functions importable from consumers.py (backward compat)
 from .consumer_helpers import (
-    # _db_filter_from_profile_id,
     _debug_enabled,
-    _pcm16_stats_le,
     _silence_pcm16,
     _normalize_text_for_tts,
     _chunk_text_for_cadence,
@@ -179,17 +177,17 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def _db_create_conversation_session(self, profile_id: str, loved_one_id: int) -> int:
         """
-        Creates a conversations.ConversationSession row.
-        - If profile_id is numeric => treat as user_id (your existing convention).
-        - Otherwise store profile_id and keep user NULL.
+        Creates a conversations.ConversationSession row for VOICE channel.
+        Uses authenticated user from TokenAuthMiddleware (self.scope["user"]) when available.
         """
         from conversations.models import ConversationSession
 
-        user_id = (profile_id or "default").strip()
+        user = getattr(self, "scope", {}).get("user", None)
 
         s = ConversationSession.objects.create(
-            user_id=user_id,
+            user=user if (user and getattr(user, "is_authenticated", False)) else None,
             loved_one_id=int(loved_one_id),
+            channel=ConversationSession.CHANNEL_VOICE,
         )
         return int(s.id)
 
@@ -200,7 +198,7 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
         sid = int(session_id or 0)
         if not sid:
             return
-        ConversationSession.objects.filter(id=sid, ended_at__isnull=True).update(ended_at=timezone.now())
+        ConversationSession.objects.filter(id=sid).update(last_activity_at=timezone.now())
 
     @database_sync_to_async
     def _db_add_message(self, session_id: int, role: str, content: str):

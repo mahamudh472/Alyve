@@ -51,3 +51,18 @@ class ConversationMessageSerializer(serializers.ModelSerializer):
         model = ConversationMessage
         fields = ["id", "session", "role", "content", "seq", "created_at"]
         read_only_fields = ["id", "created_at"]
+
+
+class ChatRequestSerializer(serializers.Serializer):
+    loved_one_id = serializers.IntegerField()
+    message = serializers.CharField(allow_blank=False, trim_whitespace=True)
+    session_id = serializers.IntegerField(required=False)
+    save_to_rag = serializers.BooleanField(required=False, default=True)
+
+
+class ChatResponseSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()
+    session_id = serializers.IntegerField()
+    assistant_message_id = serializers.IntegerField()
+    assistant = serializers.CharField()
+    rag_used = serializers.IntegerField()

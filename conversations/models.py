@@ -1,3 +1,4 @@
+# conversations/models.py
 from __future__ import annotations
 
 from django.conf import settings
@@ -9,6 +10,22 @@ class ConversationSession(models.Model):
     A single voice/text session between a user (optional) and a LovedOne.
     Stores overall metadata and links messages via ConversationMessage.
     """
+
+    CHANNEL_CHAT = "chat"
+    CHANNEL_VOICE = "voice"
+
+    CHANNEL_CHOICES = [
+        (CHANNEL_CHAT, "Chat"),
+        (CHANNEL_VOICE, "Voice"),
+    ]
+
+    channel = models.CharField(
+        max_length=16,
+        choices=CHANNEL_CHOICES,
+        default=CHANNEL_CHAT,
+        db_index=True,
+    )
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -16,7 +33,6 @@ class ConversationSession(models.Model):
         blank=True,
         related_name="conversation_sessions",
     )
-
 
     loved_one = models.ForeignKey(
         "voice.LovedOne",
@@ -34,7 +50,7 @@ class ConversationSession(models.Model):
 
     def __str__(self) -> str:
         lo = getattr(self.loved_one, "name", "") or f"loved_one:{self.loved_one_id}"
-        return f"Session#{self.id} ({self.user_id}) ↔ {lo}"
+        return f"Session#{self.id} [{self.channel}] ({self.user_id}) ↔ {lo}"
 
 
 class ConversationMessage(models.Model):

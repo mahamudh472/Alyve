@@ -72,6 +72,22 @@ class ChromaRAG(RAGBase):
 
         return chunks
 
+    @staticmethod
+    def _where_and(*clauses: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Chroma 'where' validation (in some versions) requires exactly one top-level operator
+        when combining multiple predicates. This helper:
+          - returns {} if no clauses
+          - returns the single clause unchanged if only one is provided
+          - wraps multiple clauses with {"$and": [ ... ]}
+        """
+        cs = [c for c in clauses if c]
+        if not cs:
+            return {}
+        if len(cs) == 1:
+            return cs[0]
+        return {"$and": cs}
+
     def add_memory(
         self,
         *,
@@ -79,6 +95,7 @@ class ChromaRAG(RAGBase):
         loved_one_id: int,
         text: str,
         memory_id: str,
+        metadata: Dict[str, Any] | None = None,  # ✅ NEW: accept extra metadata
         chunk_long: bool = True,
         max_chars: int = 900,
         overlap_chars: int = 140,
@@ -101,13 +118,19 @@ class ChromaRAG(RAGBase):
             # dedup check
             if dedup_exact:
                 try:
+                    # NOTE: Chroma get() doesn't accept include=["ids"] in some versions.
+                    # ids are returned by default; include is only for documents/metadatas/embeddings/etc.
                     existing = self.collection.get(
-                        where={"profile_id": profile_id, "loved_one_id": int(loved_one_id), "hash": h},
-                        include=["ids"],
+                        where=self._where_and(
+                            {"profile_id": profile_id},
+                            {"loved_one_id": int(loved_one_id)},
+                            {"hash": h},
+                        ),
                     )
                     if existing and existing.get("ids"):
                         continue
                 except Exception:
+                    # Keep existing behavior: ignore dedup failures and proceed to insert
                     pass
 
             vid = f"{memory_id}:{i}" if len(parts) > 1 else str(memory_id)
@@ -122,6 +145,14 @@ class ChromaRAG(RAGBase):
             if len(parts) > 1:
                 meta["chunk_index"] = i
                 meta["chunk_total"] = len(parts)
+
+            # ✅ NEW: merge extra metadata safely (stored in Chroma metadatas)
+            extra = metadata or {}
+            for k, v in extra.items():
+                # prevent overriding core keys used for filtering/dedup
+                if k in ("profile_id", "loved_one_id", "hash"):
+                    continue
+                meta[k] = v
 
             self.collection.add(
                 ids=[vid],
@@ -169,7 +200,10 @@ class ChromaRAG(RAGBase):
         res = self.collection.query(
             query_embeddings=[emb],
             n_results=candidate_k,
-            where={"profile_id": profile_id, "loved_one_id": int(loved_one_id)},
+            where=self._where_and(
+                {"profile_id": profile_id},
+                {"loved_one_id": int(loved_one_id)},
+            ),
             include=["documents", "metadatas"],
         )
 
