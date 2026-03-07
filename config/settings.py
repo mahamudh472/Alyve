@@ -327,3 +327,10 @@ LOGGING = {
         },
     },
 }
+
+# import firebase_admin
+# from firebase_admin import credentials
+# # TODO: need to add the proper file name
+# cred = credentials.Certificate(os.path.join(BASE_DIR, 'gymgeniusai-firebase-adminsdk.json'))
+# firebase_admin.initialize_app(cred)
+
