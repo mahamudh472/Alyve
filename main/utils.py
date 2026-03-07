@@ -4,6 +4,9 @@ from datetime import datetime, timedelta
 from accounts.models import OTP
 from django.utils import timezone
 from django.core.mail import send_mail
+from accounts.models import Notification
+from firebase_admin.messaging import Message, Notification as FCMNotification, UnregisteredError
+from fcm_django.models import FCMDevice
 
 def generate_access_token(user):
     payload = {
@@ -33,3 +36,30 @@ def send_otp_email(user):
     )
     OTP.objects.create(user=user, code=otp, expires_at=expires_at)  # Save OTP to the database
     print(f"Sending OTP {otp} to {user.email}")
+
+def add_notification(user, title, message):
+    """Utility function to add a notification for a user."""
+    Notification.objects.create(
+        user=user,
+        title=title,
+        message=message,
+    )
+    devices = FCMDevice.objects.filter(user=user)
+    for device in devices:
+        try:
+            response = device.send_message(
+                Message(
+                    notification=FCMNotification(
+                        title=title,
+                        body=message
+                    )
+                )
+            )
+            print(f"Success: device={device.id}, msg_id={response}")
+
+        except UnregisteredError:
+            print(f"❌ Device {device.id} is no longer registered. Removing...")
+            device.delete()  # recommended
+
+        except Exception as e:
+            print(f"❌ Failed sending to device {device.id}: {e}")
