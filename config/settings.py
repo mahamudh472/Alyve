@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     "voice",
     'strawberry.django',
     'conversations',
+    'fcm_django',
 
 ]
 
@@ -130,6 +131,19 @@ UNFOLD = {
                         "title": "Site Settings",
                         "icon": "settings",
                         "link": "/admin/accounts/sitesetting/",
+                    },
+                ],
+            },
+            # FCMDevice is the model for storing user device tokens for push notifications
+            {
+                "title": "Push Notifications",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "FCM Devices",
+                        "icon": "notifications",
+                        "link": "/admin/fcm_django/fcmdevice/",
                     },
                 ],
             },
@@ -328,9 +342,8 @@ LOGGING = {
     },
 }
 
-# import firebase_admin
-# from firebase_admin import credentials
-# # TODO: need to add the proper file name
-# cred = credentials.Certificate(os.path.join(BASE_DIR, 'gymgeniusai-firebase-adminsdk.json'))
-# firebase_admin.initialize_app(cred)
+import firebase_admin
+from firebase_admin import credentials
+cred = credentials.Certificate(os.path.join(BASE_DIR,"eternalink27-firebase-adminsdk-fbsvc-3e599484ed.json"))
+firebase_admin.initialize_app(cred)
 
