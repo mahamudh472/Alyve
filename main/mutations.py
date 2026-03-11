@@ -1,17 +1,19 @@
 import strawberry
 from .types import (AuthPayload, RefreshPayload, RegisterPayload, VerifyOTPPayload,
     SentOTPPayload, CheckOTPPayload, ChangePasswordPayload, LovedOneType, MarkNotificationReadPayload, 
-    UserType, DeleteAccountPayload, DeleteLovedOnePayload
+    UserType, DeleteAccountPayload, DeleteLovedOnePayload, DeviceTokenRegisterPayload, DeviceTokenUnregisterPayload
 )
 from accounts.models import User, OTP, Notification
 from django.contrib.auth import authenticate
-from .utils import generate_access_token, generate_refresh_token, send_otp_email
+from .utils import generate_access_token, generate_refresh_token, send_otp_email, add_notification
 from .auth import get_user_from_refresh_token
 from django.utils import timezone
 from graphql import GraphQLError
 from typing import Optional
 from strawberry.file_uploads import Upload
 from voice.models import LovedOne
+from fcm_django.models import FCMDevice
+
 
 @strawberry.type
 class Mutation:
@@ -199,3 +201,26 @@ class Mutation:
            raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
         user.delete()
         return DeleteAccountPayload(success=True)
+
+    @strawberry.field
+    def register_device_token(self, info, device_token: str) -> DeviceTokenRegisterPayload:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        device, created = FCMDevice.objects.update_or_create(
+            user=user,
+            defaults={
+                'registration_id': device_token,
+            }
+
+        )
+        return DeviceTokenRegisterPayload(success=True)
+
+    @strawberry.field
+    def unregister_device_token(self, info) -> DeviceTokenUnregisterPayload:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        FCMDevice.objects.filter(user=user).delete()
+        return DeviceTokenUnregisterPayload(success=True)
+

@@ -102,3 +102,11 @@ class DeleteLovedOnePayload:
 @strawberry.type
 class DeleteAccountPayload:
     success: bool
+
+@strawberry.type
+class DeviceTokenRegisterPayload:
+    success: bool
+
+@strawberry.type
+class DeviceTokenUnregisterPayload:
+    success: bool
