@@ -72,7 +72,7 @@ class Query:
         ).filter(user=user).order_by("-last_activity_at")[offset:offset+limit]
 
     @strawberry.field
-    def conversation_messages(self, info, session_id: int, limit: int=20, offset: int=0) -> list[ConversationMessageType]:
+    def conversation_messages(self, info, session_id: int, limit: int = 20, cursor: Optional[int] = None) -> list[ConversationMessageType]:
         user = info.context.get("request").user
         if user is None or user.is_anonymous:
            raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
@@ -80,7 +80,13 @@ class Query:
             session = ConversationSession.objects.get(id=session_id, user=user)
         except ConversationSession.DoesNotExist:
             raise GraphQLError("Conversation session not found", extensions={"code": "NOT_FOUND"})
-        return ConversationMessage.objects.filter(session=session).order_by("seq")[offset:offset+limit]
+        qs = ConversationMessage.objects.filter(session=session)
+        if cursor is not None:
+            qs = qs.filter(id__lt=cursor)
+        # Take the latest `limit` messages before the cursor, then reverse to chronological order
+        messages = list(qs.order_by("-created_at")[:limit])
+        messages.reverse()
+        return messages
 
     @strawberry.field
     def site_settings(self) -> Optional['SiteSettingType']:
