@@ -13,6 +13,7 @@ from typing import Optional
 from strawberry.file_uploads import Upload
 from voice.models import LovedOne
 from fcm_django.models import FCMDevice
+from conversations.models import ConversationSession, ConversationMessage
 
 
 @strawberry.type
@@ -224,3 +225,49 @@ class Mutation:
         FCMDevice.objects.filter(user=user).delete()
         return DeviceTokenUnregisterPayload(success=True)
 
+    @strawberry.field
+    def firebase_login(self, firebase_token: str) -> AuthPayload:
+        import jwt
+        import firebase_admin
+        import firebase_admin.auth
+        decoded_token = None
+        firebase_token = firebase_token.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+        try:
+            decoded_token = firebase_admin.auth.verify_id_token(firebase_token)
+            print("Decoded Firebase token:", decoded_token)
+            email = decoded_token.get('email')
+            print("Extracted email from Firebase token:", email)
+            if email is None:
+                raise GraphQLError("Email not found in Firebase token.", extensions={"code": "UNAUTHORIZED"})
+            name = decoded_token.get('name', email.split('@')[0])
+            print("Extracted name from Firebase token:", name)
+            picture = decoded_token.get('picture') 
+            print("Extracted picture from Firebase token:", picture)
+
+            user, created = User.objects.get_or_create(
+                email=email, 
+                defaults={
+                    'full_name': name, 
+                    'is_active': True,
+                }
+            )
+            print(f"User {'created' if created else 'found'}: {user.email}")
+            if created:
+                if picture:
+                    import urllib.request
+                    from django.core.files.base import ContentFile
+                    try:
+                        with urllib.request.urlopen(picture) as response:
+                            image_data = response.read()
+                        user.avatar.save(f"firebase_{user.id}.jpg", ContentFile(image_data), save=True)
+                    except Exception as e:
+                        print(f"Failed to download Firebase avatar: {e}")
+                add_notification(user, "Welcome to the app!", "Thank you for signing up with Firebase.")
+            access_token = generate_access_token(user)
+            refresh_token = generate_refresh_token(user)
+
+            return AuthPayload(access_token=access_token, refresh_token=refresh_token, user=user)
+
+        except Exception as e:
+            print("Error verifying Firebase token:", e)
+            raise GraphQLError("Invalid Firebase token.", extensions={"code": "UNAUTHORIZED"})
