@@ -1,10 +1,14 @@
 #from os import wait
 import strawberry
-from .types import MeResponse, LovedOneType, SiteSettingType, NotificationType, LovedOnePagination
+from .types import (
+    MeResponse, LovedOneType, SiteSettingType, 
+    NotificationType, LovedOnePagination, ConversationSessionType, ConversationMessageType
+)
 from graphql import GraphQLError
 from voice.models import LovedOne
 from typing import Optional
 from accounts.models import SiteSetting, Notification
+from conversations.models import ConversationSession, ConversationMessage
 
 @strawberry.type
 class Query:
@@ -57,6 +61,26 @@ class Query:
             items=items
         )   
 
+    @strawberry.field
+    def conversation_sessions(self, info, limit: int=10, offset: int=0) -> list[ConversationSessionType]:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        return ConversationSession.objects.prefetch_related(
+            "loved_one",
+            "user"
+        ).filter(user=user).order_by("-last_activity_at")[offset:offset+limit]
+
+    @strawberry.field
+    def conversation_messages(self, info, session_id: int, limit: int=20, offset: int=0) -> list[ConversationMessageType]:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        try:
+            session = ConversationSession.objects.get(id=session_id, user=user)
+        except ConversationSession.DoesNotExist:
+            raise GraphQLError("Conversation session not found", extensions={"code": "NOT_FOUND"})
+        return ConversationMessage.objects.filter(session=session).order_by("seq")[offset:offset+limit]
 
     @strawberry.field
     def site_settings(self) -> Optional['SiteSettingType']:

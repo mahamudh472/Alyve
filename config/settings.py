@@ -123,6 +123,23 @@ UNFOLD = {
                 ],
             },
             {
+                "title": "Conversations",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Sessions",
+                        "icon": "chat",
+                        "link": "/admin/conversations/conversationsession/",
+                    },
+                    {
+                        "title": "Messages",
+                        "icon": "message",
+                        "link": "/admin/conversations/conversationmessage/",
+                    },
+                ],
+            },
+            {
                 "title": "Settings",
                 "separator": True,
                 "collapsible": False,

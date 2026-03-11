@@ -1,6 +1,7 @@
 import strawberry 
 from accounts.models import User, SiteSetting, Notification
 from typing import Optional
+from conversations.models import ConversationSession, ConversationMessage
 from voice.models import LovedOne
 from strawberry.scalars import JSON
 from typing import List
@@ -110,3 +111,19 @@ class DeviceTokenRegisterPayload:
 @strawberry.type
 class DeviceTokenUnregisterPayload:
     success: bool
+
+@strawberry.django.type(ConversationSession)
+class ConversationSessionType:
+    id: strawberry.auto
+    channel: strawberry.auto
+    user: UserType
+    loved_one: LovedOneType
+    last_activity_at: strawberry.auto
+
+@strawberry.django.type(ConversationMessage)
+class ConversationMessageType:
+    id: strawberry.auto
+    session: ConversationSessionType
+    role: strawberry.auto
+    content: strawberry.auto
+    created_at: strawberry.auto
