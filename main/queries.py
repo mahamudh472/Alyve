@@ -69,7 +69,7 @@ class Query:
         return ConversationSession.objects.prefetch_related(
             "loved_one",
             "user"
-        ).filter(user=user).order_by("-last_activity_at")[offset:offset+limit]
+        ).filter(user=user, channel="chat").order_by("-last_activity_at")[offset:offset+limit]
 
     @strawberry.field
     def conversation_messages(self, info, session_id: int, limit: int = 20, cursor: Optional[int] = None) -> list[ConversationMessageType]:
