@@ -14,6 +14,7 @@ from strawberry.file_uploads import Upload
 from voice.models import LovedOne
 from fcm_django.models import FCMDevice
 from conversations.models import ConversationSession, ConversationMessage
+from main.utils import add_notification
 
 
 @strawberry.type
@@ -271,3 +272,11 @@ class Mutation:
         except Exception as e:
             print("Error verifying Firebase token:", e)
             raise GraphQLError("Invalid Firebase token.", extensions={"code": "UNAUTHORIZED"})
+
+    @strawberry.field
+    def test_notification(self, info, title: str, message: str) -> MarkNotificationReadPayload:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        add_notification(user, title, message)
+        return MarkNotificationReadPayload(success=True)
