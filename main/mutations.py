@@ -1,7 +1,8 @@
 import strawberry
 from .types import (AuthPayload, RefreshPayload, RegisterPayload, VerifyOTPPayload,
     SentOTPPayload, CheckOTPPayload, ChangePasswordPayload, LovedOneType, MarkNotificationReadPayload, 
-    UserType, DeleteAccountPayload, DeleteLovedOnePayload, DeviceTokenRegisterPayload, DeviceTokenUnregisterPayload
+    UserType, DeleteAccountPayload, DeleteLovedOnePayload, DeviceTokenRegisterPayload, DeviceTokenUnregisterPayload,
+    ChatPayload
 )
 from accounts.models import User, OTP, Notification
 from django.contrib.auth import authenticate
@@ -13,7 +14,9 @@ from typing import Optional
 from strawberry.file_uploads import Upload
 from voice.models import LovedOne
 from fcm_django.models import FCMDevice
+from conversations.chat_service import run_chat_turn
 from conversations.models import ConversationSession, ConversationMessage
+from main.utils import add_notification
 
 
 @strawberry.type
@@ -208,6 +211,8 @@ class Mutation:
         user = info.context.get("request").user
         if user is None or user.is_anonymous:
            raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        if FCMDevice.objects.filter(registration_id=device_token).exists():
+            FCMDevice.objects.filter(registration_id=device_token).delete()
         device, created = FCMDevice.objects.update_or_create(
             user=user,
             defaults={
@@ -224,6 +229,28 @@ class Mutation:
            raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
         FCMDevice.objects.filter(user=user).delete()
         return DeviceTokenUnregisterPayload(success=True)
+
+    @strawberry.field
+    def chat(self, info, loved_one_id: int, message: str, session_id: Optional[int] = None) -> ChatPayload:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+
+        session, assistant_msg, rag_used = run_chat_turn(
+            user=user,
+            loved_one_id=loved_one_id,
+            message=message,
+            session_id=session_id,
+            save_to_rag=True,
+        )
+
+        return ChatPayload(
+            ok=True,
+            session_id=session.id,
+            assistant_message_id=assistant_msg.id,
+            assistant=assistant_msg.content,
+            rag_used=rag_used,
+        )
 
     @strawberry.field
     def firebase_login(self, firebase_token: str) -> AuthPayload:
@@ -271,3 +298,11 @@ class Mutation:
         except Exception as e:
             print("Error verifying Firebase token:", e)
             raise GraphQLError("Invalid Firebase token.", extensions={"code": "UNAUTHORIZED"})
+
+    @strawberry.field
+    def test_notification(self, info, title: str, message: str) -> MarkNotificationReadPayload:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+           raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+        add_notification(user, title, message)
+        return MarkNotificationReadPayload(success=True)

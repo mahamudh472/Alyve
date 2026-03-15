@@ -189,6 +189,11 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             loved_one_id=int(loved_one_id),
             channel=ConversationSession.CHANNEL_VOICE,
         )
+
+        # Voice call started: update LovedOne conversation timestamp.
+        from .models import LovedOne
+        LovedOne.objects.filter(id=int(loved_one_id)).update(last_conversation_at=timezone.now())
+
         return int(s.id)
 
     @database_sync_to_async
@@ -230,6 +235,16 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             seq=seq,
         )
         ConversationSession.objects.filter(id=sid).update(last_activity_at=timezone.now())
+
+        # Any voice message turn should refresh LovedOne's last conversation timestamp.
+        loved_one_id = (
+            ConversationSession.objects.filter(id=sid)
+            .values_list("loved_one_id", flat=True)
+            .first()
+        )
+        if loved_one_id:
+            from .models import LovedOne
+            LovedOne.objects.filter(id=int(loved_one_id)).update(last_conversation_at=timezone.now())
 
     @database_sync_to_async
     def _db_get_recent_history(self, session_id: int, max_msgs: int = 14):

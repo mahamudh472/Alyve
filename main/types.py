@@ -112,13 +112,21 @@ class DeviceTokenRegisterPayload:
 class DeviceTokenUnregisterPayload:
     success: bool
 
+@strawberry.type
+class ChatPayload:
+    ok: bool
+    session_id: int
+    assistant_message_id: int
+    assistant: str
+    rag_used: int
+
 @strawberry.django.type(ConversationSession)
 class ConversationSessionType:
     id: strawberry.auto
     channel: strawberry.auto
     user: UserType
     loved_one: LovedOneType
-    last_activity_at: strawberry.auto
+    # last_activity_at: strawberry.auto
 
 @strawberry.django.type(ConversationMessage)
 class ConversationMessageType:
