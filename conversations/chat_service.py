@@ -300,6 +300,9 @@ def run_chat_turn(
         seq=_next_seq(session),
     )
 
+    # Main active path (GraphQL chat): keep LovedOne conversation timestamp fresh.
+    LovedOne.objects.filter(id=lo.id).update(last_conversation_at=timezone.now())
+
     # Update last activity
     ConversationSession.objects.filter(id=session.id).update(last_activity_at=timezone.now())
 
