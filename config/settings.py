@@ -7,6 +7,18 @@ load_dotenv(os.getenv("DOTENV_PATH", ".env"))
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_csv(name: str, default: str = "") -> list[str]:
+    raw = os.getenv(name, default)
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def environment_callback(request):
     """Returns environment badge for Unfold admin"""
     if DEBUG:
@@ -18,21 +30,29 @@ def environment_callback(request):
 # Core security / environment
 # ----------------------------
 
-DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
+DEBUG = env_bool("DJANGO_DEBUG", False)
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
 if not DEBUG and not SECRET_KEY:
     raise RuntimeError("DJANGO_SECRET_KEY must be set in production")
-ALLOWED_HOSTS = ["*"]
 
-# CSRF trustend origins all for now
-CSRF_TRUSTED_ORIGINS = [
-    "http://*",
-    "https://*",
-]
-CSRF_COOKIE_SECURE = False
-SESSION_COOKIE_SECURE = False
-SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+ALLOWED_HOSTS = env_csv("DJANGO_ALLOWED_HOSTS", "*")
+
+# Toggle HTTPS-aware behavior for deployments behind Nginx/ALB/Ingress.
+HTTPS_ENABLED = env_bool("DJANGO_HTTPS_ENABLED", False)
+
+# Comma-separated list, e.g. https://example.com,https://api.example.com
+CSRF_TRUSTED_ORIGINS = env_csv("DJANGO_CSRF_TRUSTED_ORIGINS", "")
+
+CSRF_COOKIE_SECURE = HTTPS_ENABLED
+SESSION_COOKIE_SECURE = HTTPS_ENABLED
+SECURE_SSL_REDIRECT = HTTPS_ENABLED
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https") if HTTPS_ENABLED else None
+
+# Enable basic HSTS only when HTTPS mode is enabled.
+SECURE_HSTS_SECONDS = 31536000 if HTTPS_ENABLED else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = HTTPS_ENABLED
+SECURE_HSTS_PRELOAD = HTTPS_ENABLED
 
 INSTALLED_APPS = [
     'daphne',
@@ -221,13 +241,27 @@ else:
 # ----------------------------
 # Database
 # ----------------------------
-# Keep sqlite by default; can switch to Postgres later by changing env vars.
-DATABASES = {
-    "default": {
-        "ENGINE": os.getenv("DJANGO_DB_ENGINE", "django.db.backends.sqlite3"),
-        "NAME": os.getenv("DJANGO_DB_NAME", str(BASE_DIR / "db.sqlite3")),
+DB_BACKEND = os.getenv("DJANGO_DB_BACKEND", "sqlite").strip().lower()
+
+if DB_BACKEND == "postgres":
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("POSTGRES_DB", "alyve"),
+            "USER": os.getenv("POSTGRES_USER", "alyve"),
+            "PASSWORD": os.getenv("POSTGRES_PASSWORD", "alyve"),
+            "HOST": os.getenv("POSTGRES_HOST", "postgres"),
+            "PORT": os.getenv("POSTGRES_PORT", "5432"),
+        }
     }
-}
+else:
+    # sqlite default keeps local dev simple.
+    DATABASES = {
+        "default": {
+            "ENGINE": os.getenv("DJANGO_DB_ENGINE", "django.db.backends.sqlite3"),
+            "NAME": os.getenv("DJANGO_DB_NAME", str(BASE_DIR / "db.sqlite3")),
+        }
+    }
 
 # ----------------------------
 # Internationalization

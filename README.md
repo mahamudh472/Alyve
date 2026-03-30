@@ -99,6 +99,77 @@ uvicorn config.asgi:application --host 127.0.0.1 --port 8001 --reload
 
 ---
 
+## Quick Start (Docker)
+
+### 1) Prepare env file
+
+Create a `.env` in project root (or copy from `.env.example`):
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` and fill required keys:
+- `OPENAI_API_KEY`
+- `ELEVENLABS_API_KEY`
+- `DJANGO_HTTPS_ENABLED=1` (when using Nginx with TLS)
+- `DJANGO_CSRF_TRUSTED_ORIGINS=https://your-domain.com,https://www.your-domain.com`
+- `DJANGO_DB_BACKEND=sqlite` or `DJANGO_DB_BACKEND=postgres`
+
+If using Postgres, also set:
+- `POSTGRES_HOST=postgres`
+- `POSTGRES_PORT=5432`
+- `POSTGRES_DB=alyve`
+- `POSTGRES_USER=alyve`
+- `POSTGRES_PASSWORD=alyve`
+
+### 2) Start containers
+
+```bash
+docker compose up --build
+```
+
+Server runs at:
+- `https://127.0.0.1/` (if certs exist)
+- `http://127.0.0.1/` (automatic fallback if certs are missing)
+
+### 3) Stop containers
+
+```bash
+docker compose down
+```
+
+### Notes
+
+- The app initializes Firebase on startup using:
+  `eternalink27-firebase-adminsdk-fbsvc-3e599484ed.json`
+  Keep this file in the project root when running with Docker.
+- The container entrypoint runs migrations automatically before starting Uvicorn.
+- The container entrypoint also runs `collectstatic`, and Nginx serves `/static/` and `/media/` directly.
+- Current compose includes Redis service, but default env keeps `CHANNEL_BACKEND=inmemory`.
+- Compose includes PostgreSQL service; Django uses it only when `DJANGO_DB_BACKEND=postgres`.
+- Nginx is the public entrypoint and proxies requests (including WebSockets) to Django ASGI.
+
+### SSL certificates (optional)
+
+Put cert files in `deploy/nginx/certs/`:
+- `fullchain.pem`
+- `privkey.pem`
+
+If these files are missing, Nginx starts in HTTP-only mode automatically.
+
+For local testing, you can generate a self-signed certificate:
+
+```bash
+openssl req -x509 -nodes -newkey rsa:2048 \
+  -keyout deploy/nginx/certs/privkey.pem \
+  -out deploy/nginx/certs/fullchain.pem \
+  -days 365 \
+  -subj "/CN=localhost"
+```
+
+---
+
 ## REST API (for backend dev)
 
 All REST endpoints are under `/api/`.
