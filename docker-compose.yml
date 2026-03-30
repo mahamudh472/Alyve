@@ -1,0 +1,58 @@
+services:
+  web:
+    container_name: alyve-web
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    expose:
+      - "8001"
+    volumes:
+      - ./:/app
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  nginx:
+    container_name: alyve-nginx
+    image: nginx:1.27-alpine
+    depends_on:
+      - web
+    command: ["sh", "/etc/nginx/custom/start.sh"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx:/etc/nginx/custom:ro
+      - ./deploy/nginx/certs:/etc/nginx/certs:ro
+      - ./staticfiles:/app/staticfiles:ro
+      - ./media:/app/media:ro
+    restart: unless-stopped
+
+  redis:
+    container_name: alyve-redis
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  postgres:
+    container_name: alyve-postgres
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-alyve}
+      POSTGRES_USER: ${POSTGRES_USER:-alyve}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alyve}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  postgres_data:
