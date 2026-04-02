@@ -323,13 +323,6 @@ VOICE_APP = {
     "OPENAI_TTS_MODEL": os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
     "OPENAI_TTS_VOICE": os.getenv("OPENAI_TTS_VOICE", "cedar"),
 
-    # Realtime session options used by consumers.py
-    "OPENAI_RT_VOICE": os.getenv("OPENAI_RT_VOICE", "marin"),
-    "OPENAI_RT_TRANSCRIBE_MODEL": os.getenv("OPENAI_RT_TRANSCRIBE_MODEL", "gpt-4o-transcribe"),
-
-    # OpenAI Realtime WS URL (env-only)
-    "OPENAI_REALTIME_URL": os.getenv("OPENAI_REALTIME_URL", ""),
-
     "WHISPER_MODEL": os.getenv("WHISPER_MODEL", "base"),
 
     # Chroma persistence location (only used if VECTOR_DB=chroma)
