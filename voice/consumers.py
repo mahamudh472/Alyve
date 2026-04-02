@@ -1,3 +1,26 @@
+"""
+DEPRECATED: Old WebSocket-based Realtime Voice API
+
+This module is NO LONGER IN USE. The old architecture has been replaced with REST API endpoints:
+  - POST /api/voice/chat/text/ (non-streaming)
+  - POST /api/voice/chat/text/stream/ (streaming via Server-Sent Events)
+
+The new architecture:
+  - Frontend handles: STT (speech-to-text) and TTS (text-to-speech)
+  - Backend handles: LLM responses, RAG context, conversation history, auto-memory
+
+All functionality from this consumer (RAG context, memory extraction, prompt building, etc.)
+is now integrated into the new REST endpoints in voice/views.py
+
+TO CLEAN UP:
+1. Delete this file (voice/consumers.py)
+2. Delete voice/consumer_helpers.py (helper functions)
+3. Update voice/routing.py to remove the import (already done)
+4. Remove related settings from config/settings.py (already done)
+
+The code is left here for reference only.
+"""
+
 from __future__ import annotations
 
 import asyncio

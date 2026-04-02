@@ -1,19 +1,20 @@
-# Alyve Voice Service (Django + Realtime Voice)
+# Alyve Voice Service (Django REST API)
 
-This repo contains a Django backend + WebSocket voice pipeline used for:
-- Creating “Loved One” profiles
-- Storing memories (and indexing them in Chroma for retrieval)
-- Uploading voice samples and **auto-cloning a voice in ElevenLabs**
-- Running a realtime voice conversation loop over WebSockets (mic audio → OpenAI Realtime → cloned-voice TTS → streamed PCM back)
+This repo contains a Django backend for voice conversations:
+- Creating "Loved One" profiles with persona attributes
+- Storing memories and auto-extracting important facts from conversations
+- Uploading voice samples and auto-cloning voices in ElevenLabs
+- REST API for text-based chat with RAG context and conversation history
+- Streaming responses sentence-by-sentence via Server-Sent Events (SSE)
 
-> Note: Redis channel layer is **not tested** in this codebase yet. Local dev runs on **Uvicorn** + in-memory Channels.
+> Note: Frontend (STT/TTS) and WebSocket consumer are **deprecated**. Use the new REST API endpoints.
 
 ---
 
 ## Requirements
 
 - **Python:** 3.11 or 3.12  
-  - Python **3.13 is not supported** because the code uses `audioop` in the WebSocket consumer (removed from stdlib in 3.13).
+  - Python 3.13+ is supported (no longer uses `audioop`)
 - OS: Windows/macOS/Linux (local dev)
 - Optional (production scaling): Redis (only if you switch Channels to Redis)
 
@@ -22,16 +23,22 @@ This repo contains a Django backend + WebSocket voice pipeline used for:
 ## Project Structure (high level)
 
 - `config/`
-  - `settings.py` – Django + AI/voice settings loaded from `.env`
-  - `asgi.py` – ASGI app (HTTP + WebSocket)
-  - `urls.py` – routes: `/api/…` + `/ws/voice/`
+  - `settings.py` – Django + AI settings loaded from `.env`
+  - `asgi.py` – ASGI app (HTTP + Django Channels for other features)
+  - `urls.py` – routes: `/api/…`
 - `voice/`
-  - `models.py` – `LovedOne`, `Memory`, `VoiceSample`
-  - `views.py` – REST endpoints (`/api/lovedone/*`, `/api/memory/*`, `/api/voice/*`)
-  - `routing.py` – WebSocket URL pattern: `/ws/voice/`
-  - `consumers.py` – realtime voice pipeline + OpenAI Realtime WS + ElevenLabs streaming TTS
-  - `rag_*` – Chroma-based retrieval store (RAG)
-  - `tts_*`, `stt_*`, `llm_*` – provider implementations
+  - `models.py` – `LovedOne` model to store loved one profiles
+  - `views.py` – REST endpoints:
+    - `/api/voice/lovedone/` – Create and list loved ones
+    - `/api/voice/memory/add/` – Add memories manually
+    - `/api/voice/upload/` – Upload voice samples for cloning
+    - `/api/voice/chat/text/` – Text-based chat (non-streaming)
+    - `/api/voice/chat/text/stream/` – Text-based chat (streaming, SSE)
+  - `routing.py` – WebSocket URL patterns (deprecated)
+  - `consumers.py` – old WebSocket realtime consumer (deprecated, can be deleted)
+  - `rag_*` – Chroma-based retrieval store (RAG) for memory context
+  - `memory_auto.py` – Automatic memory extraction from conversations
+  - `prompting.py` – System prompt and response instruction building
 
 ---
 
@@ -148,7 +155,7 @@ docker compose down
 - The container entrypoint also runs `collectstatic`, and Nginx serves `/static/` and `/media/` directly.
 - Current compose includes Redis service, but default env keeps `CHANNEL_BACKEND=inmemory`.
 - Compose includes PostgreSQL service; Django uses it only when `DJANGO_DB_BACKEND=postgres`.
-- Nginx is the public entrypoint and proxies requests (including WebSockets) to Django ASGI.
+- Nginx is the public entrypoint and proxies HTTP/HTTPS requests to Django ASGI.
 
 ### SSL certificates (optional)
 
@@ -273,80 +280,47 @@ Response:
 
 ---
 
-## WebSocket API (Realtime Voice)
+## REST API (Voice Chat)
 
-### URL
-`/ws/voice/`
+### New Architecture
+- **Frontend handles:** STT (speech-to-text), TTS (text-to-speech), audio playback
+- **Backend handles:** LLM (language model), RAG (context retrieval), conversation history, auto-memory extraction
 
-Local example:
-- `ws://127.0.0.1:8001/ws/voice/`
+### Endpoints
 
-### Client → Server messages
+#### 1) Non-streaming chat
+`POST /api/voice/chat/text/`
 
-#### 1) Start a session
-Send JSON:
-
+**Request:**
 ```json
 {
-  "type": "session.start",
-  "profile_id": "default",
-  "loved_one_id": 4,
-  "vad_silence_ms": 220,
-  "vad_threshold": 0.55,
-  "ptt_enabled": false
+  "text": "What is your name?",
+  "loved_one_id": 123,
+  "session_id": 456
 }
 ```
 
-Notes:
-- Session start will **fail** if the loved one has no `eleven_voice_id` yet.
-- VAD/PTT config can be updated later with `session.config`.
-
-#### 2) Update config (optional)
+**Response:**
 ```json
 {
-  "type": "session.config",
-  "vad_silence_ms": 220,
-  "vad_threshold": 0.55,
-  "ptt_enabled": true
+  "ok": true,
+  "response": "My name is Grandma...",
+  "session_id": 456,
+  "loved_one_name": "Grandma"
 }
 ```
 
-#### 3) Push-to-talk (optional)
-```json
-{ "type": "ptt.down" }
-{ "type": "ptt.up" }
-```
+#### 2) Streaming chat (Server-Sent Events)
+`POST /api/voice/chat/text/stream/`
 
-#### 4) Interrupt assistant speech (barge-in)
-```json
-{ "type": "ai.cut_audio" }
-```
-
-#### 5) Send mic audio frames
-Send **binary WebSocket frames** containing **PCM16LE mono @ 24kHz**.
-
-The included `templates/index.html` does this automatically using an AudioContext at 24kHz and sending `Int16` PCM.
+Same request format. Response is SSE stream with `stream.sentence` events.
 
 ---
 
-### Server → Client messages
-
-- `session.connecting` – backend is connecting to OpenAI Realtime
-- `session.ready` – realtime session initialized
-- `session.started` – session started for a profile + loved_one
-- `stt.text` – transcript chunks
-- `ai.text.start` / `ai.text.delta` / `ai.text.final` – assistant text streaming
-- `rt.audio.delta` – base64 audio bytes (PCM16LE) to play
-- `rt.audio.end` – end of assistant audio stream (may not always fire)
-- `event` – internal/debug events (gated by `VOICE_DEBUG`)
-- `warn` / `error` – errors and warnings
-
----
-
-## Providers & Memory
+## Providers & Optional Features
 
 ### LLM (chat)
-- OpenAI `responses.create(... stream=True)`  
+- OpenAI `responses.create()`  
 Config:
 - `LLM_PROVIDER=openai`
 - `OPENAI_LLM_MODEL=...`
