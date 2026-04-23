@@ -65,6 +65,7 @@ class LovedOneType:
     name: strawberry.auto
     relationship: strawberry.auto
     nickname_for_user: strawberry.auto
+    eleven_voice_id: strawberry.auto # For texting purpose
     description: strawberry.auto
     core_memories: strawberry.auto
     last_conversation_at: strawberry.auto
