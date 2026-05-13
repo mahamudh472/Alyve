@@ -8,4 +8,8 @@ from django.urls import re_path
 #
 # consumers.py can be safely deleted - all functionality is now in voice/views.py
 
-websocket_urlpatterns = []
+from . import consumers
+
+websocket_urlpatterns = [
+    re_path(r"ws/voice/chat/text/stream/(?P<loved_one_id>\d+)/$", consumers.VoiceChatConsumer.as_asgi()),
+]

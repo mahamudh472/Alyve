@@ -43,6 +43,8 @@ from .memory_auto import extract_memories_via_openai, heuristic_gate
 from .providers.tts_elevenlabs import ElevenLabsTTS, ElevenLabsTTSConfig
 
 from .prompting import PromptContext, build_system_prompt, build_reply_instructions
+from conversations.models import ConversationSession, ConversationMessage
+from conversations.openai_client import stream_reply
 
 # Keep helper functions importable from consumers.py (backward compat)
 from .consumer_helpers import (
@@ -1191,3 +1193,257 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             await self._send_json({"type": "warn", "note": f"openai_ws_reader_error: {type(e).__name__}: {e}"})
         finally:
             await self._shutdown_openai()
+
+
+class VoiceChatConsumer(AsyncWebsocketConsumer):
+    """
+    WebSocket consumer for text-based voice chat.
+    Connects at ws/voice/chat/text/stream/<loved_one_id>/
+    Similar behavior to voice_chat_text_stream in views.py
+    """
+    async def connect(self):
+        self.loved_one_id = self.scope['url_route']['kwargs'].get('loved_one_id')
+        self.user = self.scope.get("user")
+        self.profile_id = str(self.user.id) if self.user and self.user.is_authenticated else "default"
+        
+        if not self.loved_one_id:
+            await self.close(code=4000)
+            return
+
+        exists = await self._check_loved_one_exists()
+        if not exists:
+            await self.close(code=4004)
+            return
+            
+        await self.accept()
+
+    @database_sync_to_async
+    def _check_loved_one_exists(self):
+        from .models import LovedOne
+        return LovedOne.objects.filter(id=self.loved_one_id).exists()
+
+    async def receive(self, text_data):
+        try:
+            data = json.loads(text_data)
+        except Exception:
+            await self.send(json.dumps({"type": "error", "message": "Invalid JSON"}))
+            return
+
+        text = (data.get("text") or "").strip()
+        session_id = data.get("session_id")
+        
+        if not text:
+            await self.send(json.dumps({"type": "error", "message": "text is required"}))
+            return
+
+        # Prepare session and build prompt
+        prep = await self._prepare_session_and_prompt(text, session_id)
+        if not prep:
+            await self.send(json.dumps({"type": "error", "message": "Failed to prepare session or loved_one not found"}))
+            return
+            
+        conv_session_id, loved_one_name, system_prompt = prep
+        
+        # Send stream.start event
+        await self.send(json.dumps({
+            "type": "stream.start",
+            "session_id": conv_session_id,
+            "loved_one_name": loved_one_name
+        }))
+        
+        # Stream response
+        full_assistant_text = ""
+        sentence_buffer = ""
+        sentence_idx = 0
+        
+        try:
+            # Bridge sync generator to async consumer using a queue
+            queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+            
+            def producer():
+                try:
+                    for delta in stream_reply(system_prompt=system_prompt, user_text=text):
+                        loop.call_soon_threadsafe(queue.put_nowait, delta)
+                    loop.call_soon_threadsafe(queue.put_nowait, None) # EOF
+                except Exception as e:
+                    loop.call_soon_threadsafe(queue.put_nowait, e)
+
+            producer_task = asyncio.create_task(asyncio.to_thread(producer))
+            
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                
+                delta = item
+                full_assistant_text += delta
+                sentence_buffer += delta
+                
+                # Send delta immediately for real-time streaming
+                await self.send(json.dumps({
+                    "type": "stream.delta",
+                    "delta": delta
+                }))
+                
+                # Check for sentence boundaries
+                if any(t in sentence_buffer for t in ('. ', '! ', '? ', '.\n', '!\n', '?\n')):
+                    parts = self._split_into_sentences(sentence_buffer)
+                    if len(parts) > 1:
+                        # Send all complete sentences
+                        for i in range(len(parts) - 1):
+                            s = parts[i].strip()
+                            if s:
+                                await self.send(json.dumps({
+                                    "type": "stream.sentence",
+                                    "sentence": s,
+                                    "index": sentence_idx
+                                }))
+                                sentence_idx += 1
+                        sentence_buffer = parts[-1]
+
+            # Handle remaining buffer
+            if sentence_buffer.strip():
+                parts = self._split_into_sentences(sentence_buffer)
+                for s in parts:
+                    s = s.strip()
+                    if s:
+                        await self.send(json.dumps({
+                            "type": "stream.sentence",
+                            "sentence": s,
+                            "index": sentence_idx
+                        }))
+                        sentence_idx += 1
+
+            # Send stream.complete event
+            await self.send(json.dumps({
+                "type": "stream.complete",
+                "total_sentences": sentence_idx
+            }))
+            
+            # Post-stream updates
+            if full_assistant_text:
+                await self._save_assistant_message(conv_session_id, full_assistant_text)
+                
+                # Background memory extraction
+                from .views import _auto_memory_background
+                asyncio.create_task(asyncio.to_thread(
+                    _auto_memory_background, 
+                    self.profile_id, 
+                    int(self.loved_one_id), 
+                    text, 
+                    full_assistant_text
+                ))
+
+        except Exception as e:
+            await self.send(json.dumps({"type": "error", "message": f"Streaming failed: {str(e)}"}))
+
+    def _split_into_sentences(self, text: str) -> list[str]:
+        if not text:
+            return []
+        # Split by . ! ? followed by space or newline
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        return [s.strip() for s in sentences if s.strip()]
+
+    @database_sync_to_async
+    def _prepare_session_and_prompt(self, text, session_id):
+        from .models import LovedOne
+        from django.db import transaction
+        from .rag_factory import get_rag
+        
+        try:
+            lo = LovedOne.objects.filter(id=self.loved_one_id).first()
+            if not lo:
+                return None
+            
+            with transaction.atomic():
+                if session_id:
+                    conv_session = ConversationSession.objects.filter(id=session_id, loved_one_id=self.loved_one_id).first()
+                    if not conv_session:
+                        return None
+                else:
+                    conv_session = ConversationSession.objects.create(
+                        user=self.user if self.user and self.user.is_authenticated else None,
+                        loved_one_id=int(self.loved_one_id),
+                        channel=ConversationSession.CHANNEL_VOICE,
+                    )
+                
+                # Save user message
+                last_seq = ConversationMessage.objects.filter(session_id=conv_session.id).order_by("-seq").values_list("seq", flat=True).first()
+                seq = int(last_seq or 0) + 1
+                ConversationMessage.objects.create(
+                    session_id=conv_session.id,
+                    role="user",
+                    content=text,
+                    seq=seq
+                )
+                
+                # Update timestamps
+                ConversationSession.objects.filter(id=conv_session.id).update(last_activity_at=timezone.now())
+                LovedOne.objects.filter(id=int(self.loved_one_id)).update(last_conversation_at=timezone.now())
+
+            # Build system prompt (RAG + Persona)
+            rag_docs = []
+            try:
+                _rag = get_rag()
+                rag_result = _rag.query(
+                    profile_id=self.profile_id,
+                    loved_one_id=int(self.loved_one_id),
+                    query_text=text,
+                    k=6
+                )
+                rag_docs = rag_result.docs or []
+            except Exception:
+                pass
+            
+            rag_context = ""
+            if rag_docs:
+                picked = []
+                total_chars = 0
+                for doc in rag_docs:
+                    doc_str = (doc or "").strip()
+                    if not doc_str: continue
+                    doc_str = (doc_str[:320] if len(doc_str) > 320 else doc_str)
+                    if total_chars + len(doc_str) > 1400: break
+                    picked.append(doc_str)
+                    total_chars += len(doc_str)
+                if picked:
+                    rag_context = "CONTEXT (relevant memories):\n" + "\n".join(f"- {x}" for x in picked) + "\n"
+
+            persona_parts = []
+            if lo.name: persona_parts.append(f"Name: {lo.name}")
+            if lo.relationship: persona_parts.append(f"Relationship: {lo.relationship}")
+            if lo.speaking_style: persona_parts.append(f"Speaking style: {lo.speaking_style}")
+            if lo.catch_phrase: persona_parts.append(f"Catch phrase: {lo.catch_phrase}")
+            if lo.description: persona_parts.append(f"Description: {lo.description}")
+            persona_block = "\n".join(persona_parts) if persona_parts else "(no persona data)"
+            
+            memories_block = (lo.core_memories or "")
+            if rag_context:
+                memories_block = (memories_block + "\n\n" + rag_context).strip() if memories_block else rag_context
+                
+            prompt_ctx = PromptContext(
+                profile_id=self.profile_id,
+                loved_one_id=int(self.loved_one_id),
+                persona_block=persona_block,
+                memories_block=memories_block
+            )
+            system_prompt = build_system_prompt(prompt_ctx)
+            
+            return conv_session.id, lo.name, system_prompt
+        except Exception:
+            return None
+
+    @database_sync_to_async
+    def _save_assistant_message(self, session_id, content):
+        last_seq_val = ConversationMessage.objects.filter(session_id=session_id).order_by("-seq").values_list("seq", flat=True).first()
+        final_seq = int(last_seq_val or 0) + 1
+        ConversationMessage.objects.create(
+            session_id=session_id,
+            role="assistant",
+            content=content,
+            seq=final_seq
+        )
+        ConversationSession.objects.filter(id=session_id).update(last_activity_at=timezone.now())
