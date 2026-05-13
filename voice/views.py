@@ -786,50 +786,85 @@ def voice_chat_text_stream(request):
                     memories_block=memories_block,
                 )
                 system_prompt = build_system_prompt(prompt_ctx)
-                
-                # Call OpenAI
-                from conversations.openai_client import generate_reply
-                
-                try:
-                    result = generate_reply(system_prompt=system_prompt, user_text=text)
-                    assistant_response = result.text
-                except Exception as e:
-                    yield f"event: error\ndata: {{\"error\": \"openai_failed: {type(e).__name__}: {str(e)[:100]}\"}}\n\n"
-                    return
+
+                from conversations.openai_client import generate_reply, stream_reply
                 
                 # Send stream start event
                 loved_one_name = (lo.name or '').replace('"', '\\"')
                 yield f'event: stream.start\ndata: {{"session_id": {conv_session.id}, "loved_one_name": "{loved_one_name}"}}\n\n'
+
+            # --- LLM STREAMING (OUTSIDE TRANSACTION) ---
+            full_assistant_text = ""
+            sentence_buffer = ""
+            sentence_idx = 0
+            
+            # Simple incremental sentence splitting:
+            # We yield as soon as we see a terminator followed by space or end of stream.
+            for delta in stream_reply(system_prompt=system_prompt, user_text=text):
+                full_assistant_text += delta
+                sentence_buffer += delta
                 
-                # Split into sentences and stream
-                sentences = _split_into_sentences(assistant_response)
-                for idx, sentence in enumerate(sentences):
-                    # Escape quotes for JSON
-                    escaped_sentence = sentence.replace('"', '\\"')
-                    yield f"event: stream.sentence\ndata: {{\"sentence\": \"{escaped_sentence}\", \"index\": {idx}}}\n\n"
+                # Check if we have a sentence terminator
+                # We look for . ! ? followed by a space or if it's the very end
+                # (but we only know it's the end after the loop)
+                if any(t in sentence_buffer for t in ('. ', '! ', '? ', '.\n', '!\n', '?\n')):
+                    # Use the existing splitter on what we have so far
+                    parts = _split_into_sentences(sentence_buffer)
+                    # If we have at least 2 parts, the first ones are definitely complete sentences
+                    if len(parts) > 1:
+                        for i in range(len(parts) - 1):
+                            s = parts[i].strip()
+                            if s:
+                                escaped_s = s.replace('"', '\\"')
+                                yield f"event: stream.sentence\ndata: {{\"sentence\": \"{escaped_s}\", \"index\": {sentence_idx}}}\n\n"
+                                sentence_idx += 1
+                        # Keep the last part as the new buffer
+                        sentence_buffer = parts[-1]
+            
+            # Flush the remaining buffer
+            if sentence_buffer.strip():
+                parts = _split_into_sentences(sentence_buffer)
+                for s in parts:
+                    s = s.strip()
+                    if s:
+                        escaped_s = s.replace('"', '\\"')
+                        yield f"event: stream.sentence\ndata: {{\"sentence\": \"{escaped_s}\", \"index\": {sentence_idx}}}\n\n"
+                        sentence_idx += 1
+
+            # Send completion event
+            yield f"event: stream.complete\ndata: {{\"total_sentences\": {sentence_idx}}}\n\n"
+            
+            # --- POST-STREAM UPDATES ---
+            if full_assistant_text:
+                # Save full response to database
+                from conversations.models import ConversationMessage
                 
-                # Send completion event
-                yield f"event: stream.complete\ndata: {{\"total_sentences\": {len(sentences)}}}\n\n"
+                last_seq_val = (
+                    ConversationMessage.objects.filter(session_id=conv_session.id)
+                    .order_by("-seq")
+                    .values_list("seq", flat=True)
+                    .first()
+                )
+                final_seq = int(last_seq_val or 0) + 1
                 
-                # Save full response to database (after streaming)
-                seq += 1
                 ConversationMessage.objects.create(
                     session_id=conv_session.id,
                     role="assistant",
-                    content=assistant_response,
-                    seq=seq,
+                    content=full_assistant_text,
+                    seq=final_seq,
                 )
                 
+                # Update timestamps
+                from conversations.models import ConversationSession
                 ConversationSession.objects.filter(id=conv_session.id).update(last_activity_at=timezone.now())
                 
-                # Extract and save memories in background (non-blocking)
+                # Extract and save memories in background
                 mem_thread = Thread(
                     target=_auto_memory_background,
-                    args=(profile_key, int(loved_one_id), text, assistant_response),
+                    args=(profile_key, int(loved_one_id), text, full_assistant_text),
                     daemon=True,
                 )
                 mem_thread.start()
-        
         except Exception as e:
             yield f"event: error\ndata: {{\"error\": \"unexpected_error: {type(e).__name__}: {str(e)[:100]}\"}}\n\n"
     

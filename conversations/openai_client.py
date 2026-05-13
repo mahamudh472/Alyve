@@ -59,3 +59,41 @@ def generate_reply(*, system_prompt: str, user_text: str) -> LLMResult:
         raise RuntimeError("OpenAI returned empty output")
 
     return LLMResult(text=out)
+
+
+def stream_reply(*, system_prompt: str, user_text: str):
+    """
+    Synchronous generator that yields text deltas from OpenAI Responses API.
+    """
+    api_key = _get_env("OPENAI_API_KEY")
+    model = _get_env("OPENAI_LLM_MODEL", "gpt-5.2-chat-latest")
+
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+
+    stream = client.responses.create(
+        model=model,
+        input=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+        stream=True,
+    )
+
+    for event in stream:
+        etype = getattr(event, "type", "")
+        if etype == "response.output_text.delta":
+            delta = getattr(event, "delta", "")
+            if delta:
+                yield delta
+        elif etype in ("response.output_text.done", "response.text.done"):
+            # Some SDK versions might put the full text here
+            text = getattr(event, "text", "")
+            if text:
+                # We usually only want deltas, but if this is the only thing we get...
+                # For now, let's just yield deltas.
+                pass
