@@ -788,29 +788,33 @@ def voice_chat_text_stream(request):
                 system_prompt = build_system_prompt(prompt_ctx)
 
                 from conversations.openai_client import generate_reply, stream_reply
-                
-                # Send stream start event
-                loved_one_name = (lo.name or '').replace('"', '\\"')
-                yield f'event: stream.start\ndata: {{"session_id": {conv_session.id}, "loved_one_name": "{loved_one_name}"}}\n\n'
+            
+            # DEBUG LOGGING
+            with open("streaming_debug.log", "a") as f_log:
+                f_log.write(f"--- Starting stream for session {conv_session.id} ---\n")
 
-            # --- LLM STREAMING (OUTSIDE TRANSACTION) ---
+            # --- START STREAMING (OUTSIDE TRANSACTION) ---
+            # Padding to bypass proxy buffers (1KB of whitespace in a comment)
+            yield f": {' ' * 1024}\n\n"
+
+            # Send stream start event
+            loved_one_name = (lo.name or '').replace('"', '\\"')
+            yield f'event: stream.start\ndata: {{"session_id": {conv_session.id}, "loved_one_name": "{loved_one_name}"}}\n\n'
+
+            # --- LLM STREAMING ---
             full_assistant_text = ""
             sentence_buffer = ""
             sentence_idx = 0
             
-            # Simple incremental sentence splitting:
-            # We yield as soon as we see a terminator followed by space or end of stream.
             for delta in stream_reply(system_prompt=system_prompt, user_text=text):
                 full_assistant_text += delta
                 sentence_buffer += delta
                 
-                # Check if we have a sentence terminator
-                # We look for . ! ? followed by a space or if it's the very end
-                # (but we only know it's the end after the loop)
+                with open("streaming_debug.log", "a") as f_log:
+                    f_log.write(f"Delta: {repr(delta)} | Buffer: {repr(sentence_buffer)}\n")
+
                 if any(t in sentence_buffer for t in ('. ', '! ', '? ', '.\n', '!\n', '?\n')):
-                    # Use the existing splitter on what we have so far
                     parts = _split_into_sentences(sentence_buffer)
-                    # If we have at least 2 parts, the first ones are definitely complete sentences
                     if len(parts) > 1:
                         for i in range(len(parts) - 1):
                             s = parts[i].strip()
@@ -818,10 +822,10 @@ def voice_chat_text_stream(request):
                                 escaped_s = s.replace('"', '\\"')
                                 yield f"event: stream.sentence\ndata: {{\"sentence\": \"{escaped_s}\", \"index\": {sentence_idx}}}\n\n"
                                 sentence_idx += 1
-                        # Keep the last part as the new buffer
+                                with open("streaming_debug.log", "a") as f_log:
+                                    f_log.write(f"Yielded sentence: {s}\n")
                         sentence_buffer = parts[-1]
             
-            # Flush the remaining buffer
             if sentence_buffer.strip():
                 parts = _split_into_sentences(sentence_buffer)
                 for s in parts:
@@ -830,8 +834,9 @@ def voice_chat_text_stream(request):
                         escaped_s = s.replace('"', '\\"')
                         yield f"event: stream.sentence\ndata: {{\"sentence\": \"{escaped_s}\", \"index\": {sentence_idx}}}\n\n"
                         sentence_idx += 1
+                        with open("streaming_debug.log", "a") as f_log:
+                            f_log.write(f"Yielded final sentence: {s}\n")
 
-            # Send completion event
             yield f"event: stream.complete\ndata: {{\"total_sentences\": {sentence_idx}}}\n\n"
             
             # --- POST-STREAM UPDATES ---

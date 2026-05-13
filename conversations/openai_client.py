@@ -85,15 +85,16 @@ def stream_reply(*, system_prompt: str, user_text: str):
     )
 
     for event in stream:
-        etype = getattr(event, "type", "")
+        # Use a more robust way to get attributes, similar to voice/providers/llm_openai.py
+        def _get(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        etype = _get(event, "type", "")
         if etype == "response.output_text.delta":
-            delta = getattr(event, "delta", "")
+            delta = _get(event, "delta", "")
             if delta:
                 yield delta
         elif etype in ("response.output_text.done", "response.text.done"):
-            # Some SDK versions might put the full text here
-            text = getattr(event, "text", "")
-            if text:
-                # We usually only want deltas, but if this is the only thing we get...
-                # For now, let's just yield deltas.
-                pass
+            pass
