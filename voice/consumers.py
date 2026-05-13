@@ -24,6 +24,7 @@ The code is left here for reference only.
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 import base64
 import json
 import os
@@ -1244,11 +1245,15 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
             
         conv_session_id, loved_one_name, system_prompt = prep
         
+        # Get ElevenLabs single-use token for the frontend
+        eleven_token = await self._get_elevenlabs_token()
+        
         # Send stream.start event
         await self.send(json.dumps({
             "type": "stream.start",
             "session_id": conv_session_id,
-            "loved_one_name": loved_one_name
+            "loved_one_name": loved_one_name,
+            "eleven_token": eleven_token
         }))
         
         # Stream response
@@ -1281,12 +1286,6 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
                 delta = item
                 full_assistant_text += delta
                 sentence_buffer += delta
-                
-                # Send delta immediately for real-time streaming
-                await self.send(json.dumps({
-                    "type": "stream.delta",
-                    "delta": delta
-                }))
                 
                 # Check for sentence boundaries
                 if any(t in sentence_buffer for t in ('. ', '! ', '? ', '.\n', '!\n', '?\n')):
@@ -1447,3 +1446,26 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
             seq=final_seq
         )
         ConversationSession.objects.filter(id=session_id).update(last_activity_at=timezone.now())
+
+    async def _get_elevenlabs_token(self):
+        """
+        Request a single-use token from ElevenLabs to avoid exposing API key on frontend.
+        """
+        api_key = settings.VOICE_APP.get("ELEVENLABS_API_KEY") or os.getenv("ELEVENLABS_API_KEY", "")
+        if not api_key:
+            return None
+        
+        # Endpoint for single-use tokens (TTS WebSocket)
+        url = "https://api.elevenlabs.io/v1/single-use-token/tts_websocket"
+        headers = {"xi-api-key": api_key}
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("token")
+                    else:
+                        return None
+        except Exception:
+            return None
