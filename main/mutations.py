@@ -177,7 +177,6 @@ class Mutation:
         if full_name is not None:
             user.full_name = full_name
         if avatar is not None:
-            print(f"DEBUG avatar type: {type(avatar)}, value: {avatar}")
             user.avatar.save(avatar.name, avatar)
         if password is not None:
             user.set_password(password)

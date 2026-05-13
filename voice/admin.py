@@ -1,6 +1,6 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin
-from .models import LovedOne
+from .models import LovedOne, Quote
 
 
 @admin.register(LovedOne)
@@ -8,5 +8,13 @@ class LovedOneAdmin(ModelAdmin):
     list_display = ('name', 'relationship')
     search_fields = ('name', 'relationship')
     list_filter = ('relationship',)
+    list_filter_submit = True
+
+
+@admin.register(Quote)
+class QuoteAdmin(ModelAdmin):
+    list_display = ("content", "quote_type", "loved_one", "created_at")
+    search_fields = ("content",)
+    list_filter = ("quote_type",)
     list_filter_submit = True
     

@@ -70,7 +70,7 @@ INSTALLED_APPS = [
 
     "rest_framework",
     "channels",
-    "voice",
+    "voice.apps.VoiceConfig",
     'strawberry.django',
     'conversations',
     'fcm_django',
@@ -139,6 +139,11 @@ UNFOLD = {
                         "title": "Loved Ones",
                         "icon": "favorite",
                         "link": "/admin/voice/lovedone/",
+                    },
+                    {
+                        "title": "Quotes",
+                        "icon": "format_quote",
+                        "link": "/admin/voice/quote/",
                     }
                 ],
             },

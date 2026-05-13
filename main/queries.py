@@ -1,11 +1,12 @@
 #from os import wait
 import strawberry
 from .types import (
-    MeResponse, LovedOneType, SiteSettingType, 
-    NotificationType, LovedOnePagination, ConversationSessionType, ConversationMessageType
+    MeResponse, LovedOneType, SiteSettingType,
+    NotificationType, LovedOnePagination, ConversationSessionType, ConversationMessageType,
+    QuoteType,
 )
 from graphql import GraphQLError
-from voice.models import LovedOne
+from voice.models import LovedOne, Quote
 from typing import Optional
 from accounts.models import SiteSetting, Notification
 from conversations.models import ConversationSession, ConversationMessage
@@ -130,6 +131,25 @@ class Query:
             return SiteSetting.objects.first()
         except SiteSetting.DoesNotExist:
             return None
+
+    @strawberry.field
+    def quote(self, info) -> Optional[QuoteType]:
+        user = info.context.get("request").user
+
+        if user is not None and not user.is_anonymous:
+            personal_quote = (
+                Quote.objects.filter(quote_type=Quote.QuoteScope.PERSONAL, user=user)
+                .order_by("?")
+                .first()
+            )
+            if personal_quote is not None:
+                return personal_quote
+
+        return (
+            Quote.objects.filter(quote_type=Quote.QuoteScope.GLOBAL)
+            .order_by("?")
+            .first()
+        )
     
     @strawberry.field
     def notifications(self, info, limit: int=10, offset: int=0) -> list[NotificationType]:

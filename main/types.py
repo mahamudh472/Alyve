@@ -2,7 +2,7 @@ import strawberry
 from accounts.models import User, SiteSetting, Notification
 from typing import Optional
 from conversations.models import ConversationSession, ConversationMessage
-from voice.models import LovedOne
+from voice.models import LovedOne, Quote
 from strawberry.scalars import JSON
 from typing import List
 
@@ -78,6 +78,15 @@ class LovedOneType:
 class LovedOnePagination:
     total_count: int
     items: List[LovedOneType]
+
+
+@strawberry.django.type(Quote)
+class QuoteType:
+    id: strawberry.auto
+    quote_type: strawberry.auto
+    content: strawberry.auto
+    loved_one: Optional[LovedOneType]
+    created_at: strawberry.auto
 
 
 @strawberry.django.type(SiteSetting)
