@@ -1201,12 +1201,26 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
     WebSocket consumer for text-based voice chat.
     Connects at ws/voice/chat/text/stream/<loved_one_id>/
     Similar behavior to voice_chat_text_stream in views.py
+
+    Stream cancellation
+    -------------------
+    Streaming runs in a background asyncio.Task (_stream_task) so that
+    receive() remains free to accept a concurrent "stream.stop" message.
+    When "stream.stop" arrives the task is cancelled, partial assistant
+    text is persisted to the DB, and a "stream.stopped" acknowledgement
+    is sent to the frontend.  The consumer is then fully ready to handle
+    new text messages.
     """
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     async def connect(self):
         self.loved_one_id = self.scope['url_route']['kwargs'].get('loved_one_id')
         self.user = self.scope.get("user")
         self.profile_id = str(self.user.id) if self.user and self.user.is_authenticated else "default"
-        
+
         if not self.loved_one_id:
             await self.close(code=4000)
             return
@@ -1215,13 +1229,44 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         if not exists:
             await self.close(code=4004)
             return
-            
+
+        # Per-connection streaming state
+        self._stream_task: Optional[asyncio.Task] = None
+        self._stop_streaming: bool = False
+        # Holds accumulated assistant text for the in-flight stream so that
+        # _stop_stream_handler() can persist it even when it interrupts early.
+        self._current_partial_text: str = ""
+        self._current_conv_session_id: int = 0
+
         await self.accept()
+
+    async def disconnect(self, close_code):
+        """Cancel any in-flight stream task on disconnect."""
+        await self._cancel_stream_task()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _cancel_stream_task(self):
+        """Cancel _stream_task and await it silently."""
+        task = getattr(self, "_stream_task", None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._stream_task = None
 
     @database_sync_to_async
     def _check_loved_one_exists(self):
         from .models import LovedOne
         return LovedOne.objects.filter(id=self.loved_one_id).exists()
+
+    # ------------------------------------------------------------------
+    # receive() – entry point for all incoming WebSocket messages
+    # ------------------------------------------------------------------
 
     async def receive(self, text_data):
         try:
@@ -1230,24 +1275,46 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
             await self.send(json.dumps({"type": "error", "message": "Invalid JSON"}))
             return
 
+        mtype = data.get("type", "")
+
+        # ----------------------------------------------------------------
+        # "stream.stop" – cancel any in-flight streaming task
+        # ----------------------------------------------------------------
+        if mtype == "stream.stop":
+            await self._stop_stream_handler()
+            return
+
+        # ----------------------------------------------------------------
+        # Default: a new text message to stream a reply for
+        # ----------------------------------------------------------------
         text = (data.get("text") or "").strip()
         session_id = data.get("session_id")
-        
+
         if not text:
             await self.send(json.dumps({"type": "error", "message": "text is required"}))
             return
+
+        # If a previous stream is still running, cancel it cleanly first
+        if self._stream_task and not self._stream_task.done():
+            await self._cancel_stream_task()
+
+        # Reset per-stream state
+        self._stop_streaming = False
+        self._current_partial_text = ""
+        self._current_conv_session_id = 0
 
         # Prepare session and build prompt
         prep = await self._prepare_session_and_prompt(text, session_id)
         if not prep:
             await self.send(json.dumps({"type": "error", "message": "Failed to prepare session or loved_one not found"}))
             return
-            
+
         conv_session_id, loved_one_name, system_prompt = prep
-        
+        self._current_conv_session_id = conv_session_id
+
         # Get ElevenLabs single-use token for the frontend
         eleven_token = await self._get_elevenlabs_token()
-        
+
         # Send stream.start event
         await self.send(json.dumps({
             "type": "stream.start",
@@ -1255,44 +1322,105 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
             "loved_one_name": loved_one_name,
             "eleven_token": eleven_token
         }))
-        
-        # Stream response
+
+        # Launch streaming in a background task so receive() stays free
+        # to handle a concurrent "stream.stop" message.
+        self._stream_task = asyncio.create_task(
+            self._run_stream(text, system_prompt, conv_session_id)
+        )
+
+    # ------------------------------------------------------------------
+    # Stream stop handler
+    # ------------------------------------------------------------------
+
+    async def _stop_stream_handler(self):
+        """
+        Handle a "stream.stop" event from the frontend.
+        Cancels the in-flight streaming task, persists whatever partial
+        assistant text has been accumulated so far, and sends a
+        "stream.stopped" acknowledgement.
+        """
+        # Snapshot and clear the partial text *before* cancelling the task
+        # to avoid a race with the streaming loop's own writes.
+        partial_text = self._current_partial_text
+        conv_session_id = self._current_conv_session_id
+
+        self._stop_streaming = True  # signal the inner loop to exit
+        await self._cancel_stream_task()
+
+        # Persist partial text to keep conversation history consistent
+        if partial_text and conv_session_id:
+            try:
+                await self._save_assistant_message(conv_session_id, partial_text)
+            except Exception:
+                pass
+
+        # Reset state so subsequent messages work normally
+        self._stop_streaming = False
+        self._current_partial_text = ""
+        self._current_conv_session_id = 0
+
+        await self.send(json.dumps({"type": "stream.stopped"}))
+
+    # ------------------------------------------------------------------
+    # Background streaming task
+    # ------------------------------------------------------------------
+
+    async def _run_stream(self, text: str, system_prompt: str, conv_session_id: int):
+        """
+        Background task that drives the LLM stream and forwards sentences
+        to the frontend.  Checks self._stop_streaming after every queue
+        read so it exits promptly when the frontend sends "stream.stop".
+        """
         full_assistant_text = ""
         sentence_buffer = ""
         sentence_idx = 0
-        
+
         try:
-            # Bridge sync generator to async consumer using a queue
-            queue = asyncio.Queue()
+            # Bridge the sync generator to the async world via a queue
+            queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
-            
+
             def producer():
                 try:
                     for delta in stream_reply(system_prompt=system_prompt, user_text=text):
                         loop.call_soon_threadsafe(queue.put_nowait, delta)
-                    loop.call_soon_threadsafe(queue.put_nowait, None) # EOF
-                except Exception as e:
-                    loop.call_soon_threadsafe(queue.put_nowait, e)
+                    loop.call_soon_threadsafe(queue.put_nowait, None)  # EOF sentinel
+                except Exception as exc:
+                    loop.call_soon_threadsafe(queue.put_nowait, exc)
 
-            producer_task = asyncio.create_task(asyncio.to_thread(producer))
-            
+            asyncio.create_task(asyncio.to_thread(producer))
+
             while True:
+                # Check stop flag before each read
+                if self._stop_streaming:
+                    return
+
                 item = await queue.get()
-                if item is None:
+
+                # Check stop flag immediately after unblocking
+                if self._stop_streaming:
+                    return
+
+                if item is None:  # EOF
                     break
                 if isinstance(item, Exception):
                     raise item
-                
-                delta = item
+
+                delta: str = item
                 full_assistant_text += delta
+                # Keep the shared partial text in sync so _stop_stream_handler
+                # can read it at any point during streaming.
+                self._current_partial_text = full_assistant_text
                 sentence_buffer += delta
-                
-                # Check for sentence boundaries
+
+                # Flush completed sentences to the frontend
                 if any(t in sentence_buffer for t in ('. ', '! ', '? ', '.\n', '!\n', '?\n')):
                     parts = self._split_into_sentences(sentence_buffer)
                     if len(parts) > 1:
-                        # Send all complete sentences
                         for i in range(len(parts) - 1):
+                            if self._stop_streaming:
+                                return
                             s = parts[i].strip()
                             if s:
                                 await self.send(json.dumps({
@@ -1303,10 +1431,12 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
                                 sentence_idx += 1
                         sentence_buffer = parts[-1]
 
-            # Handle remaining buffer
-            if sentence_buffer.strip():
+            # Flush any remaining buffer
+            if sentence_buffer.strip() and not self._stop_streaming:
                 parts = self._split_into_sentences(sentence_buffer)
                 for s in parts:
+                    if self._stop_streaming:
+                        return
                     s = s.strip()
                     if s:
                         await self.send(json.dumps({
@@ -1316,28 +1446,37 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
                         }))
                         sentence_idx += 1
 
-            # Send stream.complete event
+            if self._stop_streaming:
+                return
+
+            # Normal completion
             await self.send(json.dumps({
                 "type": "stream.complete",
                 "total_sentences": sentence_idx
             }))
-            
-            # Post-stream updates
+
+            # Post-stream: persist and trigger memory extraction
             if full_assistant_text:
                 await self._save_assistant_message(conv_session_id, full_assistant_text)
-                
-                # Background memory extraction
+
                 from .views import _auto_memory_background
                 asyncio.create_task(asyncio.to_thread(
-                    _auto_memory_background, 
-                    self.profile_id, 
-                    int(self.loved_one_id), 
-                    text, 
+                    _auto_memory_background,
+                    self.profile_id,
+                    int(self.loved_one_id),
+                    text,
                     full_assistant_text
                 ))
 
-        except Exception as e:
-            await self.send(json.dumps({"type": "error", "message": f"Streaming failed: {str(e)}"}))
+        except asyncio.CancelledError:
+            # Task was cancelled externally (e.g. by _cancel_stream_task);
+            # _stop_stream_handler is responsible for persisting partial text.
+            return
+        except Exception as exc:
+            try:
+                await self.send(json.dumps({"type": "error", "message": f"Streaming failed: {str(exc)}"}))            
+            except Exception:
+                pass
 
     def _split_into_sentences(self, text: str) -> list[str]:
         if not text:
