@@ -100,3 +100,67 @@ class SiteSetting(models.Model):
         if not self.pk and SiteSetting.objects.exists():
             raise ValidationError("Only one SiteSetting instance allowed")
         return super().save(*args, **kwargs)
+
+
+class Plan(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    revenuecat_product_id = models.CharField(max_length=100, unique=True, blank=True, null=True)
+    description = models.TextField(blank=True, null=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    clone_limit = models.IntegerField(default=0)  # Number of cloned voices allowed
+    talk_time_limit = models.IntegerField(default=0)  # Talk time limit in seconds
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'plans'
+        ordering = ['price']
+
+    def __str__(self):
+        return f"{self.name} (${self.price})"
+
+
+class UserSubscription(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='subscription')
+    plan = models.ForeignKey(Plan, on_delete=models.PROTECT, related_name='user_subscriptions')
+    start_date = models.DateTimeField(default=timezone.now)
+    end_date = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'user_subscriptions'
+
+    def __str__(self):
+        return f"{self.user.email} - {self.plan.name}"
+
+
+class SubscriptionCloneUsage(models.Model):
+    subscription = models.ForeignKey(UserSubscription, on_delete=models.CASCADE, related_name='clone_usages')
+    loved_one = models.ForeignKey("voice.LovedOne", on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'subscription_clone_usages'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Clone usage for {self.subscription.user.email} at {self.created_at}"
+
+
+class SubscriptionTalkTimeUsage(models.Model):
+    subscription = models.ForeignKey(UserSubscription, on_delete=models.CASCADE, related_name='talk_time_usages')
+    session = models.ForeignKey("conversations.ConversationSession", on_delete=models.SET_NULL, null=True, blank=True)
+    duration = models.IntegerField()  # duration in seconds
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'subscription_talk_time_usages'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Talk time usage ({self.duration}s) for {self.subscription.user.email} at {self.created_at}"
+
+

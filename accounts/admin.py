@@ -2,7 +2,7 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin
 from unfold.decorators import display
-from .models import User, SiteSetting, Notification
+from .models import User, SiteSetting, Notification, Plan, UserSubscription, SubscriptionCloneUsage, SubscriptionTalkTimeUsage
 from .forms import SiteSettingForm
 
 
@@ -58,3 +58,33 @@ class SiteSettingAdmin(ModelAdmin):
             return self.change_view(request, object_id=str(site_setting.id))
         except SiteSetting.DoesNotExist:
             return super().changelist_view(request, extra_context)
+
+
+@admin.register(Plan)
+class PlanAdmin(ModelAdmin):
+    list_display = ('name', 'price', 'clone_limit', 'talk_time_limit', 'is_active')
+    search_fields = ('name',)
+    list_filter = ('is_active',)
+
+
+@admin.register(UserSubscription)
+class UserSubscriptionAdmin(ModelAdmin):
+    list_display = ('user', 'plan', 'start_date', 'end_date', 'is_active')
+    search_fields = ('user__email', 'plan__name')
+    list_filter = ('is_active', 'plan')
+
+
+@admin.register(SubscriptionCloneUsage)
+class SubscriptionCloneUsageAdmin(ModelAdmin):
+    list_display = ('subscription', 'loved_one', 'created_at')
+    search_fields = ('subscription__user__email', 'loved_one__name')
+    list_filter = ('created_at',)
+
+
+@admin.register(SubscriptionTalkTimeUsage)
+class SubscriptionTalkTimeUsageAdmin(ModelAdmin):
+    list_display = ('subscription', 'duration', 'session', 'created_at')
+    search_fields = ('subscription__user__email', 'session__id')
+    list_filter = ('created_at',)
+
+

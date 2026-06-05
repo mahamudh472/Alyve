@@ -131,6 +131,33 @@ UNFOLD = {
                 ],
             },
             {
+                "title": "Subscriptions",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Plans",
+                        "icon": "card_membership",
+                        "link": "/admin/accounts/plan/",
+                    },
+                    {
+                        "title": "User Subscriptions",
+                        "icon": "wallet",
+                        "link": "/admin/accounts/usersubscription/",
+                    },
+                    {
+                        "title": "Clone Usages",
+                        "icon": "analytics",
+                        "link": "/admin/accounts/subscriptioncloneusage/",
+                    },
+                    {
+                        "title": "Talk Time Usages",
+                        "icon": "hourglass_empty",
+                        "link": "/admin/accounts/subscriptiontalktimeusage/",
+                    },
+                ],
+            },
+            {
                 "title": "Voice Companions",
                 "separator": True,
                 "collapsible": True,

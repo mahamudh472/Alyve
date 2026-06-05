@@ -1,9 +1,7 @@
 from django.urls import path
-
-# from .views import RegisterView, LoginView, UserProfileView, UpdateProfileView, ChangePasswordView
+from .views import RevenueCatWebhookView
 
 urlpatterns = [
-    # path('register/', RegisterView.as_view(), name='register'),
-    # path('login/', LoginView.as_view(), name='login'),
-    # path('profile/', UserProfileView.as_view(), name='profile')
+    path('webhooks/revenuecat/', RevenueCatWebhookView.as_view(), name='revenuecat-webhook'),
 ]
+
