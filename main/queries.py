@@ -1,14 +1,15 @@
 #from os import wait
 import strawberry
+from django.db.models import Sum
 from .types import (
     MeResponse, LovedOneType, SiteSettingType,
     NotificationType, LovedOnePagination, ConversationSessionType, ConversationMessageType,
-    QuoteType,
+    QuoteType, PlanInfoType,
 )
 from graphql import GraphQLError
 from voice.models import LovedOne, Quote
 from typing import Optional
-from accounts.models import SiteSetting, Notification
+from accounts.models import SiteSetting, Notification, UserSubscription
 from conversations.models import ConversationSession, ConversationMessage
 
 @strawberry.type
@@ -157,3 +158,32 @@ class Query:
         if user is None or user.is_anonymous:
            raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
         return Notification.objects.filter(user=user).order_by("-created_at")[offset:offset+limit]
+
+    @strawberry.field
+    def plan_info(self, info) -> Optional[PlanInfoType]:
+        user = info.context.get("request").user
+        if user is None or user.is_anonymous:
+            raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
+
+        subscription = UserSubscription.objects.filter(user=user).select_related('plan').first()
+        if not subscription:
+            return None
+
+        plan = subscription.plan
+        clone_usage = subscription.clone_usages.count()
+        talk_time_usage = subscription.talk_time_usages.aggregate(total=Sum('duration'))['total'] or 0
+
+        return PlanInfoType(
+            plan_name=plan.name,
+            description=plan.description,
+            price=float(plan.price),
+            is_active=subscription.is_active,
+            start_date=subscription.start_date,
+            end_date=subscription.end_date,
+            expiry_date=subscription.end_date,
+            clone_limit=plan.clone_limit,
+            clone_usage=clone_usage,
+            talk_time_limit=plan.talk_time_limit,
+            talk_time_usage=talk_time_usage,
+        )
+
