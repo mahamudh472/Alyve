@@ -109,3 +109,57 @@ class QuoteGenerationTests(TestCase):
 		self.assertIsNone(result.errors)
 		self.assertEqual(result.data["quote"]["content"], "Global quote")
 		self.assertEqual(result.data["quote"]["quoteType"], "global")
+
+	@patch("voice.quote_generation.generate_reply")
+	def test_personal_quotes_generated_on_subsequent_update(self, mock_generate_reply):
+		# Create loved one with missing fields
+		loved_one = LovedOne.objects.create(
+			user=self.user,
+			description="Missing fields first",
+		)
+
+		quotes = Quote.objects.filter(loved_one=loved_one, quote_type=Quote.QuoteScope.PERSONAL)
+		self.assertEqual(quotes.count(), 0)
+		self.assertFalse(mock_generate_reply.called)
+
+		# Now add the necessary fields
+		mock_generate_reply.return_value = SimpleNamespace(
+			text='["Love is all around.", "Always in our hearts.", "Warm memory here."]'
+		)
+
+		loved_one.name = "Maya"
+		loved_one.relationship = "Mother"
+		loved_one.save()
+
+		quotes = Quote.objects.filter(loved_one=loved_one, quote_type=Quote.QuoteScope.PERSONAL).order_by("created_at")
+		self.assertEqual(quotes.count(), 3)
+		self.assertEqual(quotes[0].content, "Love is all around.")
+		self.assertEqual(mock_generate_reply.call_count, 1)
+
+	@patch("voice.quote_generation.generate_reply")
+	def test_personal_quotes_not_regenerated_if_already_exist(self, mock_generate_reply):
+		mock_generate_reply.return_value = SimpleNamespace(
+			text='["First quote.", "Second quote.", "Third quote."]'
+		)
+
+		loved_one = LovedOne.objects.create(
+			user=self.user,
+			name="Maya",
+			relationship="Mother",
+		)
+
+		quotes = Quote.objects.filter(loved_one=loved_one, quote_type=Quote.QuoteScope.PERSONAL)
+		self.assertEqual(quotes.count(), 3)
+		self.assertEqual(mock_generate_reply.call_count, 1)
+
+		# Reset the mock to verify it doesn't get called again
+		mock_generate_reply.reset_mock()
+
+		# Update another field
+		loved_one.description = "Updated description"
+		loved_one.save()
+
+		# Verify mock was not called and quotes are still present
+		self.assertFalse(mock_generate_reply.called)
+		quotes = Quote.objects.filter(loved_one=loved_one, quote_type=Quote.QuoteScope.PERSONAL)
+		self.assertEqual(quotes.count(), 3)
