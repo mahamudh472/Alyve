@@ -151,14 +151,9 @@ class ConversationMessageType:
 @strawberry.type
 class PlanInfoType:
     plan_name: str
-    description: Optional[str]
-    price: float
-    is_active: bool
-    start_date: Optional[datetime.datetime]
-    end_date: Optional[datetime.datetime]
-    expiry_date: Optional[datetime.datetime]
     clone_limit: int
     clone_usage: int
+    total_loved_ones: int
     talk_time_limit: int
     talk_time_usage: int
 

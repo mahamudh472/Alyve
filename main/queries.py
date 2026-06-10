@@ -172,18 +172,14 @@ class Query:
         plan = subscription.plan
         clone_usage = subscription.clone_usages.count()
         talk_time_usage = subscription.talk_time_usages.aggregate(total=Sum('duration'))['total'] or 0
+        total_loved_ones = LovedOne.objects.filter(user=user).count()
 
         return PlanInfoType(
             plan_name=plan.name,
-            description=plan.description,
-            price=float(plan.price),
-            is_active=subscription.is_active,
-            start_date=subscription.start_date,
-            end_date=subscription.end_date,
-            expiry_date=subscription.end_date,
             clone_limit=plan.clone_limit,
             clone_usage=clone_usage,
             talk_time_limit=plan.talk_time_limit,
             talk_time_usage=talk_time_usage,
+            total_loved_ones=total_loved_ones,
         )
 
