@@ -56,8 +56,6 @@ services:
   dozzle:
     image: amir20/dozzle:latest
     restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       DOZZLE_AUTH_PROVIDER: simple
     volumes:
