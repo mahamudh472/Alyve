@@ -58,6 +58,7 @@ services:
     restart: unless-stopped
     environment:
       DOZZLE_AUTH_PROVIDER: simple
+      DOZZLE_BASE: /logs
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./dozzle/users.yml:/data/users.yml:ro
