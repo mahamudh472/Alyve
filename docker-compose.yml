@@ -61,8 +61,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./dozzle/users.yml:/data/users.yml:ro
-    profiles:
-      - prod
 
 volumes:
   redis_data:
