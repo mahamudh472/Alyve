@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from .auth import get_user_from_refresh_token
 from .utils import generate_access_token, generate_refresh_token
 from voice.models import LovedOne
-from .serializers import UserAvatarSerializer, LovedOneVoiceFileSerializer
+from .serializers import UserAvatarSerializer, LovedOneVoiceFileSerializer, LovedOneAvatarSerializer
 import logging
 from voice.views import _maybe_clone_eleven_voice
 
@@ -63,18 +63,16 @@ class LovedOneVoiceUploadAPIView(GenericAPIView):
             if api_key:
                 from accounts.models import UserSubscription, SubscriptionCloneUsage
                 subscription = UserSubscription.objects.filter(user=request.user, is_active=True).select_related('plan').first()
-                if not subscription:
-                    if is_new:
-                        loved_one.delete()
-                    return Response({"error": "You do not have an active subscription. Please subscribe to clone a voice."}, status=403)
                 
-                has_usage = SubscriptionCloneUsage.objects.filter(subscription=subscription, loved_one=loved_one).exists()
-                if not has_usage:
-                    clone_usage = subscription.clone_usages.count()
-                    if clone_usage >= subscription.plan.clone_limit:
-                        if is_new:
-                            loved_one.delete()
-                        return Response({"error": "Voice clone limit reached for your subscription plan."}, status=403)
+                has_usage = False
+                if subscription:
+                    has_usage = SubscriptionCloneUsage.objects.filter(subscription=subscription, loved_one=loved_one).exists()
+                    if not has_usage:
+                        clone_usage = subscription.clone_usages.count()
+                        if clone_usage >= subscription.plan.clone_limit:
+                            if is_new:
+                                loved_one.delete()
+                            return Response({"error": "Voice clone limit reached for your subscription plan."}, status=403)
                 
                 try:
                     voice_id = _maybe_clone_eleven_voice(loved_one, [file_path])
@@ -83,7 +81,7 @@ class LovedOneVoiceUploadAPIView(GenericAPIView):
                     loved_one.eleven_voice_id = voice_id
                     loved_one.save()
                     
-                    if not has_usage:
+                    if subscription and not has_usage:
                         SubscriptionCloneUsage.objects.create(
                             subscription=subscription,
                             loved_one=loved_one
@@ -96,6 +94,7 @@ class LovedOneVoiceUploadAPIView(GenericAPIView):
                         loved_one.save()
                     
                     error_msg = str(e)
+                    message = None
                     if "ElevenLabs clone failed" in error_msg:
                         try:
                             json_part = error_msg.split(None, 4)[4]
@@ -105,10 +104,11 @@ class LovedOneVoiceUploadAPIView(GenericAPIView):
                                 message = detail.get("message") or detail.get("status")
                             else:
                                 message = detail
-                            if message:
-                                return Response({"error": f"Voice cloning failed: {message}"}, status=400)
-                        except Exception:
+                        except (ValueError, KeyError, IndexError, json.JSONDecodeError):
                             pass
+                    
+                    if message:
+                        return Response({"error": f"Voice cloning failed: {message}"}, status=400)
                     return Response({"error": f"Voice cloning failed: {error_msg}"}, status=400)
             
             data = {
@@ -120,6 +120,34 @@ class LovedOneVoiceUploadAPIView(GenericAPIView):
         else:
             logger.error(f"Voice file upload failed: {serializer.errors}")
             return Response(serializer.errors, status=400)
+
+
+class LovedOneAvatarUploadAPIView(GenericAPIView):
+    serializer_class = LovedOneAvatarSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if serializer.is_valid():
+            avatar_file = serializer.validated_data['avatar']
+            loved_one_id = serializer.validated_data.get('id')
+            is_new = not LovedOne.objects.filter(id=loved_one_id).exists()
+            if is_new:
+                loved_one = LovedOne.objects.create(id=loved_one_id, avatar=avatar_file, user=request.user)
+            else:
+                loved_one = LovedOne.objects.get(id=loved_one_id)
+                loved_one.avatar = avatar_file
+                loved_one.save()
+            
+            data = {
+                "id": loved_one.id,
+                "name": loved_one.name,
+                "avatar": loved_one.avatar.url if loved_one.avatar else None,
+            }
+            return Response({"data": data, "message": "Avatar uploaded successfully"}, status=200)
+        else:
+            logger.error(f"Avatar upload failed: {serializer.errors}")
+            return Response(serializer.errors, status=400)
+
 
 class TokenRefreshView(GenericAPIView):
     def post(self, request, *args, **kwargs):

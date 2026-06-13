@@ -4,6 +4,7 @@ from django.db import models
 class LovedOne(models.Model):
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="loved_ones", blank=True, null=True)
     name = models.CharField(max_length=128, blank=True, null=True)
+    avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
     relationship = models.CharField(max_length=128, blank=True, null=True)
     nickname_for_user = models.CharField(max_length=128, blank=True, null=True)
     speaking_style = models.CharField(max_length=256, blank=True, null=True)

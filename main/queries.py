@@ -40,7 +40,7 @@ class Query:
                 extensions={"code": "UNAUTHENTICATED"}
             )
 
-        qs = LovedOne.objects.filter(user=user).order_by("-created_at")
+        qs = LovedOne.objects.filter(user=user, name__isnull=False).order_by("-created_at")
 
         if id is not None:
             try:

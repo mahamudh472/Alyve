@@ -64,6 +64,7 @@ class ChangePasswordPayload:
 class LovedOneType:
     id: strawberry.auto
     name: strawberry.auto
+    avatar: Optional[ImageType]
     relationship: strawberry.auto
     nickname_for_user: strawberry.auto
     eleven_voice_id: strawberry.auto # For texting purpose

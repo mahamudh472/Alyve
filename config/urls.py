@@ -5,7 +5,7 @@ from django.conf.urls.static import static
 from django.views.generic import TemplateView
 from django.views.decorators.csrf import csrf_exempt
 from main.schema import schema
-from main.views import CustomGraphQLView, UserAvatarUpdateView, LovedOneVoiceUploadAPIView, TokenRefreshView
+from main.views import CustomGraphQLView, UserAvatarUpdateView, LovedOneVoiceUploadAPIView, TokenRefreshView, LovedOneAvatarUploadAPIView
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -17,6 +17,7 @@ urlpatterns = [
     path("history/", TemplateView.as_view(template_name="conversations_history.html")),
     path("api/v1/user/avatar/", UserAvatarUpdateView.as_view(), name="user-avatar-upload"),
     path("api/v1/loved-one/voice-upload/", LovedOneVoiceUploadAPIView.as_view(), name="loved-one-voice-upload"),
+    path("api/v1/loved-one/avatar-upload/", LovedOneAvatarUploadAPIView.as_view(), name="loved-one-avatar-upload"),
     path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
 
 

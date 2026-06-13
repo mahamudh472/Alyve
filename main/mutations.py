@@ -122,17 +122,11 @@ class Mutation:
             raise GraphQLError("User not found.", extensions={"code": "NOT_FOUND"})
 
     @strawberry.field
-    def create_or_update_loved_one(self, info, id: Optional[int] = None, name: Optional[str] = None, relationship: Optional[str] = None, nickname_for_user: Optional[str] = None, description: Optional[str] = None, speaking_style: Optional[str] = None, catch_phrase: Optional[str]=None, core_memories: Optional[str]=None, voice_file: Optional[Upload] = None ) -> LovedOneType:
+    def create_or_update_loved_one(self, info, id: Optional[int] = None, name: Optional[str] = None, relationship: Optional[str] = None, nickname_for_user: Optional[str] = None, description: Optional[str] = None, speaking_style: Optional[str] = None, catch_phrase: Optional[str]=None, core_memories: Optional[str]=None ) -> LovedOneType:
         user = info.context.get("request").user
         if user is None or user.is_anonymous:
            raise GraphQLError("Authentication failed", extensions={"code": "UNAUTHENTICATED"})
         
-        from django.conf import settings
-        import os
-        import json
-        from voice.views import _maybe_clone_eleven_voice
-        from accounts.models import UserSubscription, SubscriptionCloneUsage
-
         if id is not None:
             try:
                 loved_one = LovedOne.objects.get(id=id, user=user)
@@ -143,64 +137,7 @@ class Mutation:
                 loved_one.core_memories = core_memories
                 loved_one.speaking_style = speaking_style
                 loved_one.catch_phrase = catch_phrase
-                
-                if voice_file is not None:
-                    # Save the voice file locally
-                    loved_one.voice_file.save(voice_file.name, voice_file)
-                    loved_one.save()
-                    
-                    api_key = settings.VOICE_APP.get("ELEVENLABS_API_KEY") or os.getenv("ELEVENLABS_API_KEY", "")
-                    if api_key:
-                        subscription = UserSubscription.objects.filter(user=user, is_active=True).select_related('plan').first()
-                        if not subscription:
-                            raise GraphQLError("You do not have an active subscription. Please subscribe to clone a voice.", extensions={"code": "FORBIDDEN"})
-                        
-                        has_usage = SubscriptionCloneUsage.objects.filter(subscription=subscription, loved_one=loved_one).exists()
-                        if not has_usage:
-                            clone_usage = subscription.clone_usages.count()
-                            if clone_usage >= subscription.plan.clone_limit:
-                                raise GraphQLError("Voice clone limit reached for your subscription plan.", extensions={"code": "FORBIDDEN"})
-                        
-                        # Reset eleven_voice_id to force cloning
-                        loved_one.eleven_voice_id = ""
-                        loved_one.save()
-                        
-                        try:
-                            voice_id = _maybe_clone_eleven_voice(loved_one, [loved_one.voice_file.path])
-                            if not voice_id:
-                                raise RuntimeError("ElevenLabs voice cloning returned empty voice ID.")
-                            loved_one.eleven_voice_id = voice_id
-                            loved_one.save()
-                            
-                            if not has_usage:
-                                SubscriptionCloneUsage.objects.create(
-                                    subscription=subscription,
-                                    loved_one=loved_one
-                                )
-                        except Exception as e:
-                            # Revert voice ID changes if save succeeded but clone failed
-                            loved_one.eleven_voice_id = ""
-                            loved_one.save()
-                            
-                            error_msg = str(e)
-                            message = None
-                            if "ElevenLabs clone failed" in error_msg:
-                                try:
-                                    json_part = error_msg.split(None, 4)[4]
-                                    err_data = json.loads(json_part)
-                                    detail = err_data.get("detail", {})
-                                    if isinstance(detail, dict):
-                                        message = detail.get("message") or detail.get("status")
-                                    else:
-                                        message = detail
-                                except (ValueError, KeyError, IndexError, json.JSONDecodeError):
-                                    pass
-                            
-                            if message:
-                                raise GraphQLError(f"Voice cloning failed: {message}", extensions={"code": "BAD_REQUEST"})
-                            raise GraphQLError(f"Voice cloning failed: {error_msg}", extensions={"code": "INTERNAL_SERVER_ERROR"})
-                else:
-                    loved_one.save()
+                loved_one.save()
                 return loved_one
             except LovedOne.DoesNotExist:
                 raise GraphQLError("Loved one not found", extensions={"code": "NOT_FOUND"})
@@ -215,55 +152,6 @@ class Mutation:
                 catch_phrase=catch_phrase,
                 core_memories=core_memories
             )
-            if voice_file is not None:
-                # Save the voice file locally
-                loved_one.voice_file.save(voice_file.name, voice_file)
-                loved_one.save()
-                
-                api_key = settings.VOICE_APP.get("ELEVENLABS_API_KEY") or os.getenv("ELEVENLABS_API_KEY", "")
-                if api_key:
-                    subscription = UserSubscription.objects.filter(user=user, is_active=True).select_related('plan').first()
-                    if not subscription:
-                        loved_one.delete()
-                        raise GraphQLError("You do not have an active subscription. Please subscribe to clone a voice.", extensions={"code": "FORBIDDEN"})
-                    
-                    clone_usage = subscription.clone_usages.count()
-                    if clone_usage >= subscription.plan.clone_limit:
-                        loved_one.delete()
-                        raise GraphQLError("Voice clone limit reached for your subscription plan.", extensions={"code": "FORBIDDEN"})
-                    
-                    try:
-                        voice_id = _maybe_clone_eleven_voice(loved_one, [loved_one.voice_file.path])
-                        if not voice_id:
-                            raise RuntimeError("ElevenLabs voice cloning returned empty voice ID.")
-                        loved_one.eleven_voice_id = voice_id
-                        loved_one.save()
-                        
-                        SubscriptionCloneUsage.objects.create(
-                            subscription=subscription,
-                            loved_one=loved_one
-                        )
-                    except Exception as e:
-                        # Clean up
-                        loved_one.delete()
-                        
-                        error_msg = str(e)
-                        message = None
-                        if "ElevenLabs clone failed" in error_msg:
-                            try:
-                                json_part = error_msg.split(None, 4)[4]
-                                err_data = json.loads(json_part)
-                                detail = err_data.get("detail", {})
-                                if isinstance(detail, dict):
-                                    message = detail.get("message") or detail.get("status")
-                                else:
-                                    message = detail
-                            except (ValueError, KeyError, IndexError, json.JSONDecodeError):
-                                pass
-                        
-                        if message:
-                            raise GraphQLError(f"Voice cloning failed: {message}", extensions={"code": "BAD_REQUEST"})
-                        raise GraphQLError(f"Voice cloning failed: {error_msg}", extensions={"code": "INTERNAL_SERVER_ERROR"})
             return loved_one
     @strawberry.field
     def mark_notification_read(self, info, id: int) -> MarkNotificationReadPayload:

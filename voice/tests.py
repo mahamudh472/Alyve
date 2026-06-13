@@ -168,6 +168,7 @@ class QuoteGenerationTests(TestCase):
 from django.test import override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from accounts.models import Plan, UserSubscription, SubscriptionCloneUsage
+from rest_framework.test import APIClient
 
 @override_settings(VOICE_APP={"ELEVENLABS_API_KEY": "test_key", "ELEVENLABS_BASE_URL": "https://api.elevenlabs.io"})
 class LovedOneCloningTests(TestCase):
@@ -175,105 +176,115 @@ class LovedOneCloningTests(TestCase):
 		self.user = User.objects.create_user(email="cloner@example.com", password="pass12345", full_name="Cloner User")
 		self.plan = Plan.objects.create(name="Premium", price=75.00, clone_limit=2)
 		self.subscription = UserSubscription.objects.create(user=self.user, plan=self.plan, is_active=True)
+		self.client = APIClient()
+		self.client.force_authenticate(user=self.user)
 
-	@patch("voice.views._maybe_clone_eleven_voice")
-	@patch("voice.quote_generation.generate_personal_quotes_for_loved_one")
-	def test_create_loved_one_with_voice_file_success(self, mock_generate_quotes, mock_clone):
+	@patch("main.views._maybe_clone_eleven_voice")
+	def test_create_loved_one_with_voice_file_success(self, mock_clone):
 		mock_clone.return_value = "eleven_voice_123"
+		loved_one = LovedOne.objects.create(user=self.user, name="Maya", relationship="Mother")
 		voice_file = SimpleUploadedFile("sample.wav", b"dummy audio content", content_type="audio/wav")
 
-		query = """
-		mutation CreateLovedOne($voiceFile: Upload!) {
-			createOrUpdateLovedOne(
-				name: "Maya"
-				relationship: "Mother"
-				voiceFile: $voiceFile
-			) {
-				id
-				name
-				elevenVoiceId
-			}
-		}
-		"""
-		result = schema.execute_sync(
-			query,
-			variable_values={"voiceFile": voice_file},
-			context_value={"request": SimpleNamespace(user=self.user)},
+		response = self.client.post(
+			"/api/v1/loved-one/voice-upload/",
+			{"id": loved_one.id, "voice_file": voice_file},
+			format="multipart"
 		)
 
-		self.assertIsNone(result.errors)
-		self.assertEqual(result.data["createOrUpdateLovedOne"]["name"], "Maya")
-		self.assertEqual(result.data["createOrUpdateLovedOne"]["elevenVoiceId"], "eleven_voice_123")
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["message"], "Voice file uploaded successfully")
+		self.assertEqual(response.data["data"]["id"], loved_one.id)
 
 		# Verify LovedOne in database
-		loved_one = LovedOne.objects.get(name="Maya", user=self.user)
+		loved_one.refresh_from_db()
 		self.assertEqual(loved_one.eleven_voice_id, "eleven_voice_123")
 
 		# Verify clone usage recorded
 		self.assertEqual(SubscriptionCloneUsage.objects.filter(subscription=self.subscription).count(), 1)
 
-	@patch("voice.views._maybe_clone_eleven_voice")
-	@patch("voice.quote_generation.generate_personal_quotes_for_loved_one")
-	def test_create_loved_one_with_voice_file_failure_cleanup(self, mock_generate_quotes, mock_clone):
+	@patch("main.views._maybe_clone_eleven_voice")
+	def test_create_loved_one_with_voice_file_no_subscription(self, mock_clone):
+		mock_clone.return_value = "eleven_voice_123"
+		self.subscription.delete()
+
+		loved_one = LovedOne.objects.create(user=self.user, name="Maya", relationship="Mother")
+		voice_file = SimpleUploadedFile("sample.wav", b"dummy audio content", content_type="audio/wav")
+
+		response = self.client.post(
+			"/api/v1/loved-one/voice-upload/",
+			{"id": loved_one.id, "voice_file": voice_file},
+			format="multipart"
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["message"], "Voice file uploaded successfully")
+
+		# Verify LovedOne in database
+		loved_one.refresh_from_db()
+		self.assertEqual(loved_one.eleven_voice_id, "eleven_voice_123")
+
+		# Verify clone usage is not recorded (since no subscription exists)
+		self.assertEqual(SubscriptionCloneUsage.objects.count(), 0)
+
+	@patch("main.views._maybe_clone_eleven_voice")
+	def test_create_loved_one_with_voice_file_failure_cleanup(self, mock_clone):
 		error_json = '{"detail":{"status":"quota_exceeded","message":"This request exceeds your quota."}}'
 		mock_clone.side_effect = RuntimeError(f"ElevenLabs clone failed: 401 {error_json}")
 		
+		# Test with a brand new loved one id (is_new = True path)
 		voice_file = SimpleUploadedFile("sample.wav", b"dummy audio content", content_type="audio/wav")
 
-		query = """
-		mutation CreateLovedOne($voiceFile: Upload!) {
-			createOrUpdateLovedOne(
-				name: "Maya"
-				relationship: "Mother"
-				voiceFile: $voiceFile
-			) {
-				id
-				name
-			}
-		}
-		"""
-		result = schema.execute_sync(
-			query,
-			variable_values={"voiceFile": voice_file},
-			context_value={"request": SimpleNamespace(user=self.user)},
+		response = self.client.post(
+			"/api/v1/loved-one/voice-upload/",
+			{"id": 9999, "voice_file": voice_file},
+			format="multipart"
 		)
 
-		self.assertIsNotNone(result.errors)
-		self.assertIn("Voice cloning failed: This request exceeds your quota.", result.errors[0].message)
+		self.assertEqual(response.status_code, 400)
+		self.assertIn("Voice cloning failed: This request exceeds your quota.", response.data["error"])
 
-		# Verify LovedOne was cleaned up (deleted)
-		self.assertFalse(LovedOne.objects.filter(name="Maya", user=self.user).exists())
+		# Verify LovedOne was cleaned up (deleted) because it was new
+		self.assertFalse(LovedOne.objects.filter(id=9999).exists())
 
-	@patch("voice.views._maybe_clone_eleven_voice")
-	@patch("voice.quote_generation.generate_personal_quotes_for_loved_one")
-	def test_create_loved_one_clone_limit_exceeded(self, mock_generate_quotes, mock_clone):
+	@patch("main.views._maybe_clone_eleven_voice")
+	def test_create_loved_one_clone_limit_exceeded(self, mock_clone):
 		lo1 = LovedOne.objects.create(user=self.user, name="Maya1")
 		lo2 = LovedOne.objects.create(user=self.user, name="Maya2")
 		SubscriptionCloneUsage.objects.create(subscription=self.subscription, loved_one=lo1)
 		SubscriptionCloneUsage.objects.create(subscription=self.subscription, loved_one=lo2)
 
+		loved_one = LovedOne.objects.create(user=self.user, name="Maya3")
 		voice_file = SimpleUploadedFile("sample.wav", b"dummy audio content", content_type="audio/wav")
 
-		query = """
-		mutation CreateLovedOne($voiceFile: Upload!) {
-			createOrUpdateLovedOne(
-				name: "Maya3"
-				relationship: "Mother"
-				voiceFile: $voiceFile
-			) {
-				id
-			}
-		}
-		"""
-		result = schema.execute_sync(
-			query,
-			variable_values={"voiceFile": voice_file},
-			context_value={"request": SimpleNamespace(user=self.user)},
+		response = self.client.post(
+			"/api/v1/loved-one/voice-upload/",
+			{"id": loved_one.id, "voice_file": voice_file},
+			format="multipart"
 		)
 
-		self.assertIsNotNone(result.errors)
-		self.assertEqual(result.errors[0].message, "Voice clone limit reached for your subscription plan.")
+		self.assertEqual(response.status_code, 403)
+		self.assertEqual(response.data["error"], "Voice clone limit reached for your subscription plan.")
 		
-		# Verify the new loved_one was cleaned up (deleted)
-		self.assertFalse(LovedOne.objects.filter(name="Maya3", user=self.user).exists())
+		# Verify loved_one was not deleted because it was not new (already existed in DB before upload)
+		self.assertTrue(LovedOne.objects.filter(id=loved_one.id).exists())
+
+	def test_upload_loved_one_avatar(self):
+		loved_one = LovedOne.objects.create(user=self.user, name="Maya", relationship="Mother")
+		avatar_file = SimpleUploadedFile("avatar.jpg", b"image bytes", content_type="image/jpeg")
+
+		response = self.client.post(
+			"/api/v1/loved-one/avatar-upload/",
+			{"id": loved_one.id, "avatar": avatar_file},
+			format="multipart"
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["message"], "Avatar uploaded successfully")
+		self.assertIsNotNone(response.data["data"]["avatar"])
+
+		# Verify in DB
+		loved_one.refresh_from_db()
+		self.assertTrue(loved_one.avatar.name.endswith("avatar.jpg"))
+
+
 
