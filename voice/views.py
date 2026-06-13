@@ -411,18 +411,51 @@ def upload_voice_sample(request):
         sample_paths = []
 
     if (not voice_id) and (samples_count >= min_samples):
-        try:
-            voice_id = _maybe_clone_eleven_voice(lo, sample_paths)
-        except Exception as e:
-            return Response(
-                {
-                    "ok": True,
-                    "voice_file_saved": True,
-                    "warning": f"clone_failed: {type(e).__name__}: {e}",
-                    "samples_count": samples_count,
-                    "min_samples_for_clone": min_samples,
-                }
-            )
+        api_key = settings.VOICE_APP.get("ELEVENLABS_API_KEY") or os.getenv("ELEVENLABS_API_KEY", "")
+        if api_key:
+            from accounts.models import UserSubscription, SubscriptionCloneUsage
+            user = getattr(request, "user", None)
+            if user and user.is_authenticated:
+                subscription = UserSubscription.objects.filter(user=user, is_active=True).select_related('plan').first()
+                if not subscription:
+                    return Response({"error": "You do not have an active subscription. Please subscribe to clone a voice."}, status=403)
+                
+                has_usage = SubscriptionCloneUsage.objects.filter(subscription=subscription, loved_one=lo).exists()
+                if not has_usage:
+                    clone_usage = subscription.clone_usages.count()
+                    if clone_usage >= subscription.plan.clone_limit:
+                        return Response({"error": "Voice clone limit reached for your subscription plan."}, status=403)
+            else:
+                subscription = None
+                has_usage = False
+
+            try:
+                voice_id = _maybe_clone_eleven_voice(lo, sample_paths)
+                if voice_id and subscription and not has_usage:
+                    SubscriptionCloneUsage.objects.create(
+                        subscription=subscription,
+                        loved_one=lo
+                    )
+            except Exception as e:
+                lo.eleven_voice_id = ""
+                lo.save(update_fields=["eleven_voice_id"])
+                
+                error_msg = str(e)
+                if "ElevenLabs clone failed" in error_msg:
+                    import json
+                    try:
+                        json_part = error_msg.split(None, 4)[4]
+                        err_data = json.loads(json_part)
+                        detail = err_data.get("detail", {})
+                        if isinstance(detail, dict):
+                            message = detail.get("message") or detail.get("status")
+                        else:
+                            message = detail
+                        if message:
+                            return Response({"error": f"Voice cloning failed: {message}"}, status=400)
+                    except Exception:
+                        pass
+                return Response({"error": f"Voice cloning failed: {error_msg}"}, status=400)
 
     return Response(
         {

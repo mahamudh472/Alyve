@@ -45,7 +45,8 @@ class LovedOneVoiceUploadAPIView(GenericAPIView):
             # Process the uploaded voice file here
             voice_file = serializer.validated_data['voice_file']
             loved_one_id = serializer.validated_data.get('id')
-            if not LovedOne.objects.filter(id=loved_one_id).exists():
+            is_new = not LovedOne.objects.filter(id=loved_one_id).exists()
+            if is_new:
                 loved_one = LovedOne.objects.create(id=loved_one_id, voice_file=voice_file, user=request.user)
             else:
                 loved_one = LovedOne.objects.get(id=loved_one_id)
@@ -53,11 +54,63 @@ class LovedOneVoiceUploadAPIView(GenericAPIView):
                 loved_one.save()
             # get the file path of the uploaded voice file
             file_path = loved_one.voice_file.path
-            # clone the voice file to ElevenLabs if it doesn't exist there
-            voice_id = _maybe_clone_eleven_voice(loved_one, [file_path])
-            print(f"Voice ID: {voice_id}")
-            loved_one.eleven_voice_id = voice_id
-            loved_one.save()
+            
+            from django.conf import settings
+            import os
+            import json
+            api_key = settings.VOICE_APP.get("ELEVENLABS_API_KEY") or os.getenv("ELEVENLABS_API_KEY", "")
+            
+            if api_key:
+                from accounts.models import UserSubscription, SubscriptionCloneUsage
+                subscription = UserSubscription.objects.filter(user=request.user, is_active=True).select_related('plan').first()
+                if not subscription:
+                    if is_new:
+                        loved_one.delete()
+                    return Response({"error": "You do not have an active subscription. Please subscribe to clone a voice."}, status=403)
+                
+                has_usage = SubscriptionCloneUsage.objects.filter(subscription=subscription, loved_one=loved_one).exists()
+                if not has_usage:
+                    clone_usage = subscription.clone_usages.count()
+                    if clone_usage >= subscription.plan.clone_limit:
+                        if is_new:
+                            loved_one.delete()
+                        return Response({"error": "Voice clone limit reached for your subscription plan."}, status=403)
+                
+                try:
+                    voice_id = _maybe_clone_eleven_voice(loved_one, [file_path])
+                    if not voice_id:
+                        raise RuntimeError("ElevenLabs voice cloning returned empty voice ID.")
+                    loved_one.eleven_voice_id = voice_id
+                    loved_one.save()
+                    
+                    if not has_usage:
+                        SubscriptionCloneUsage.objects.create(
+                            subscription=subscription,
+                            loved_one=loved_one
+                        )
+                except Exception as e:
+                    if is_new:
+                        loved_one.delete()
+                    else:
+                        loved_one.eleven_voice_id = ""
+                        loved_one.save()
+                    
+                    error_msg = str(e)
+                    if "ElevenLabs clone failed" in error_msg:
+                        try:
+                            json_part = error_msg.split(None, 4)[4]
+                            err_data = json.loads(json_part)
+                            detail = err_data.get("detail", {})
+                            if isinstance(detail, dict):
+                                message = detail.get("message") or detail.get("status")
+                            else:
+                                message = detail
+                            if message:
+                                return Response({"error": f"Voice cloning failed: {message}"}, status=400)
+                        except Exception:
+                            pass
+                    return Response({"error": f"Voice cloning failed: {error_msg}"}, status=400)
+            
             data = {
                 "id": loved_one.id,
                 "name": loved_one.name,
