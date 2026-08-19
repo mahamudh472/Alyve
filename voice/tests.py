@@ -270,7 +270,9 @@ class LovedOneCloningTests(TestCase):
 
 	def test_upload_loved_one_avatar(self):
 		loved_one = LovedOne.objects.create(user=self.user, name="Maya", relationship="Mother")
-		avatar_file = SimpleUploadedFile("avatar.jpg", b"image bytes", content_type="image/jpeg")
+		# 1x1 valid GIF image bytes
+		avatar_bytes = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+		avatar_file = SimpleUploadedFile("avatar.gif", avatar_bytes, content_type="image/gif")
 
 		response = self.client.post(
 			"/api/v1/loved-one/avatar-upload/",
@@ -284,7 +286,7 @@ class LovedOneCloningTests(TestCase):
 
 		# Verify in DB
 		loved_one.refresh_from_db()
-		self.assertTrue(loved_one.avatar.name.endswith("avatar.jpg"))
+		self.assertTrue(loved_one.avatar.name.endswith("avatar.gif"))
 
 
 from django.test import TransactionTestCase
@@ -323,6 +325,50 @@ class TalkTimeTrackingTests(TransactionTestCase):
 		allowed, msg = asyncio.run(consumer._db_check_talk_time_limit(str(self.user.id)))
 		self.assertFalse(allowed)
 		self.assertIn("Talk time limit of 300 seconds reached", msg)
+
+	def test_voice_chat_consumer_save_talk_time_usage(self):
+		consumer = VoiceChatConsumer()
+		consumer.user = self.user
+		consumer.loved_one_id = self.loved_one.id
+
+		asyncio.run(consumer._save_talk_time_usage(self.session.id, duration_seconds=180))
+
+		usage = SubscriptionTalkTimeUsage.objects.filter(subscription=self.subscription).first()
+		self.assertIsNotNone(usage)
+		self.assertEqual(usage.duration, 180)
+		self.assertEqual(usage.session, self.session)
+
+	def test_voice_chat_consumer_check_talk_time_limit(self):
+		consumer = VoiceChatConsumer()
+		consumer.user = self.user
+		consumer.loved_one_id = self.loved_one.id
+
+		allowed, msg = asyncio.run(consumer._check_talk_time_limit())
+		self.assertTrue(allowed)
+
+		# Exceed limit
+		SubscriptionTalkTimeUsage.objects.create(subscription=self.subscription, session=self.session, duration=300)
+		allowed, msg = asyncio.run(consumer._check_talk_time_limit())
+		self.assertFalse(allowed)
+		self.assertIn("Talk time limit of 300 seconds reached", msg)
+
+	def test_voice_chat_consumer_stop_stream_preserves_session_id(self):
+		consumer = VoiceChatConsumer()
+		consumer.user = self.user
+		consumer.loved_one_id = self.loved_one.id
+		consumer._current_conv_session_id = self.session.id
+		consumer._current_partial_text = "Hello there"
+		consumer._stream_task = None
+
+		# Mock send
+		async def mock_send(text_data):
+			pass
+		consumer.send = mock_send
+
+		asyncio.run(consumer._stop_stream_handler())
+
+		# Ensure session_id is preserved and not reset to 0
+		self.assertEqual(consumer._current_conv_session_id, self.session.id)
 
 
 

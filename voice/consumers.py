@@ -21,8 +21,7 @@ TO CLEAN UP:
 The code is left here for reference only.
 """
 
-from __future__ import annotations
-
+import logging
 import asyncio
 import aiohttp
 import base64
@@ -32,6 +31,8 @@ import re
 import audioop
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 import websockets
 from channels.db import database_sync_to_async
@@ -244,6 +245,7 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                     user = None
 
         if not user or not getattr(user, "is_authenticated", False):
+            logger.debug("[RealtimeVoiceConsumer] Talk time limit check bypassed (unauthenticated user).")
             return True, ""
 
         from accounts.models import UserSubscription, SubscriptionTalkTimeUsage
@@ -251,12 +253,15 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
 
         subscription = UserSubscription.objects.filter(user=user, is_active=True).select_related("plan").first()
         if not subscription or not subscription.plan:
+            logger.debug(f"[RealtimeVoiceConsumer] No active subscription/plan found for user {user.email}; skipping talk time limit.")
             return True, ""
 
         limit = subscription.plan.talk_time_limit
         if limit and limit > 0:
             used = SubscriptionTalkTimeUsage.objects.filter(subscription=subscription).aggregate(total=Sum("duration"))["total"] or 0
+            logger.debug(f"[RealtimeVoiceConsumer] User {user.email}: talk time used={used}s, limit={limit}s")
             if used >= limit:
+                logger.warning(f"[RealtimeVoiceConsumer] User {user.email} exceeded talk time limit: used={used}s, limit={limit}s")
                 return False, f"Talk time limit of {limit} seconds reached for your subscription plan ({subscription.plan.name})."
 
         return True, ""
@@ -268,25 +273,37 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
 
         sid = int(session_id or 0)
         if not sid:
+            logger.warning("[RealtimeVoiceConsumer] _db_end_conversation_session called with invalid session_id=0")
             return
 
         session = ConversationSession.objects.filter(id=sid).first()
         if not session:
+            logger.warning(f"[RealtimeVoiceConsumer] ConversationSession id={sid} not found in DB")
             return
 
         session.last_activity_at = timezone.now()
         session.save(update_fields=["last_activity_at"])
 
-        if duration_seconds > 0:
-            user = session.user
-            if user and getattr(user, "is_authenticated", False):
-                subscription = UserSubscription.objects.filter(user=user, is_active=True).first()
-                if subscription:
-                    SubscriptionTalkTimeUsage.objects.create(
-                        subscription=subscription,
-                        session=session,
-                        duration=duration_seconds,
-                    )
+        if duration_seconds <= 0:
+            logger.info(f"[RealtimeVoiceConsumer] Session {sid} duration was {duration_seconds}s (<= 0), no talk time usage created.")
+            return
+
+        user = session.user
+        if not user or not getattr(user, "is_authenticated", False):
+            logger.warning(f"[RealtimeVoiceConsumer] Session {sid} has no authenticated user; talk time usage not tracked.")
+            return
+
+        subscription = UserSubscription.objects.filter(user=user, is_active=True).first()
+        if not subscription:
+            logger.warning(f"[RealtimeVoiceConsumer] No active UserSubscription found for user={user.email}; talk time usage not recorded.")
+            return
+
+        usage = SubscriptionTalkTimeUsage.objects.create(
+            subscription=subscription,
+            session=session,
+            duration=duration_seconds,
+        )
+        logger.info(f"[RealtimeVoiceConsumer] Successfully created SubscriptionTalkTimeUsage id={usage.id} (duration={duration_seconds}s) for user={user.email}, session={sid}")
 
     @database_sync_to_async
     def _db_add_message(self, session_id: int, role: str, content: str):
@@ -524,14 +541,17 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
         if getattr(self, "_session_start_time", None) is not None:
             duration_seconds = max(0, int((timezone.now() - self._session_start_time).total_seconds()))
 
+        conv_session_id = int(getattr(self, "_conv_session_id", 0) or 0)
+        logger.info(f"[RealtimeVoiceConsumer] Disconnected (code={close_code}): conv_session_id={conv_session_id}, duration={duration_seconds}s, user={getattr(self, '_user', None)}")
+
         # ADDED: end DB conversation session and record talk time usage
         try:
             await self._db_end_conversation_session(
-                int(getattr(self, "_conv_session_id", 0) or 0),
+                conv_session_id,
                 duration_seconds=duration_seconds,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(f"[RealtimeVoiceConsumer] Error saving talk time usage on disconnect: {exc}", exc_info=True)
 
         await self._cancel_tts()
         await self._shutdown_openai()
@@ -1302,18 +1322,23 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         self.profile_id = str(self.user.id) if self.user and self.user.is_authenticated else "default"
         self._session_start_time = timezone.now()
 
+        logger.info(f"[VoiceChatConsumer] WebSocket connecting: loved_one_id={self.loved_one_id}, user={self.user} (authenticated={getattr(self.user, 'is_authenticated', False)})")
+
         if not self.loved_one_id:
+            logger.warning("[VoiceChatConsumer] Connection rejected: loved_one_id is missing.")
             await self.close(code=4000)
             return
 
         exists = await self._check_loved_one_exists()
         if not exists:
+            logger.warning(f"[VoiceChatConsumer] Connection rejected: loved_one_id={self.loved_one_id} not found.")
             await self.close(code=4004)
             return
 
         # Check talk time limit
         allowed, err_msg = await self._check_talk_time_limit()
         if not allowed:
+            logger.warning(f"[VoiceChatConsumer] Connection rejected: talk time limit exceeded for user={self.user}. Message: {err_msg}")
             await self.accept()
             await self.send(json.dumps({"type": "error", "error": "talk_time_limit_exceeded", "message": err_msg}))
             await self.close(code=4003)
@@ -1328,6 +1353,7 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         self._current_conv_session_id: int = 0
 
         await self.accept()
+        logger.info(f"[VoiceChatConsumer] WebSocket accepted: loved_one_id={self.loved_one_id}, user={self.user}")
 
     async def disconnect(self, close_code):
         """Cancel any in-flight stream task and record talk time usage on disconnect."""
@@ -1338,11 +1364,15 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
             duration_seconds = max(0, int((timezone.now() - self._session_start_time).total_seconds()))
 
         conv_session_id = getattr(self, "_current_conv_session_id", 0)
+        logger.info(f"[VoiceChatConsumer] Disconnected (code={close_code}): conv_session_id={conv_session_id}, duration={duration_seconds}s, user={self.user}")
+
         if conv_session_id:
             try:
                 await self._save_talk_time_usage(conv_session_id, duration_seconds)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error(f"[VoiceChatConsumer] Failed to save talk time usage for session {conv_session_id}: {exc}", exc_info=True)
+        else:
+            logger.info(f"[VoiceChatConsumer] No conversation session ID associated with connection for user={self.user}; skipping talk time save.")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1367,6 +1397,7 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def _check_talk_time_limit(self):
         if not self.user or not getattr(self.user, "is_authenticated", False):
+            logger.debug("[VoiceChatConsumer] Talk time limit check skipped (unauthenticated user).")
             return True, ""
 
         from accounts.models import UserSubscription, SubscriptionTalkTimeUsage
@@ -1374,12 +1405,15 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
 
         subscription = UserSubscription.objects.filter(user=self.user, is_active=True).select_related("plan").first()
         if not subscription or not subscription.plan:
+            logger.debug(f"[VoiceChatConsumer] No active subscription/plan found for user {self.user.email}; skipping talk time limit.")
             return True, ""
 
         limit = subscription.plan.talk_time_limit
         if limit and limit > 0:
             used = SubscriptionTalkTimeUsage.objects.filter(subscription=subscription).aggregate(total=Sum("duration"))["total"] or 0
+            logger.debug(f"[VoiceChatConsumer] User {self.user.email}: talk time used={used}s, limit={limit}s")
             if used >= limit:
+                logger.warning(f"[VoiceChatConsumer] User {self.user.email} exceeded talk time limit: used={used}s, limit={limit}s")
                 return False, f"Talk time limit of {limit} seconds reached for your subscription plan ({subscription.plan.name})."
 
         return True, ""
@@ -1391,25 +1425,37 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
 
         sid = int(session_id or 0)
         if not sid:
+            logger.warning("[VoiceChatConsumer] _save_talk_time_usage called with invalid session_id=0")
             return
 
         session = ConversationSession.objects.filter(id=sid).first()
         if not session:
+            logger.warning(f"[VoiceChatConsumer] ConversationSession id={sid} not found in DB")
             return
 
         session.last_activity_at = timezone.now()
         session.save(update_fields=["last_activity_at"])
 
-        if duration_seconds > 0:
-            user = session.user or (self.user if (self.user and getattr(self.user, "is_authenticated", False)) else None)
-            if user:
-                subscription = UserSubscription.objects.filter(user=user, is_active=True).first()
-                if subscription:
-                    SubscriptionTalkTimeUsage.objects.create(
-                        subscription=subscription,
-                        session=session,
-                        duration=duration_seconds,
-                    )
+        if duration_seconds <= 0:
+            logger.info(f"[VoiceChatConsumer] Session {sid} duration was {duration_seconds}s (<= 0), no talk time usage created.")
+            return
+
+        user = session.user or (self.user if (self.user and getattr(self.user, "is_authenticated", False)) else None)
+        if not user or not getattr(user, "is_authenticated", False):
+            logger.warning(f"[VoiceChatConsumer] Session {sid} has no authenticated user; talk time usage not tracked.")
+            return
+
+        subscription = UserSubscription.objects.filter(user=user, is_active=True).first()
+        if not subscription:
+            logger.warning(f"[VoiceChatConsumer] No active UserSubscription found for user={user.email}; talk time usage not recorded.")
+            return
+
+        usage = SubscriptionTalkTimeUsage.objects.create(
+            subscription=subscription,
+            session=session,
+            duration=duration_seconds,
+        )
+        logger.info(f"[VoiceChatConsumer] Successfully created SubscriptionTalkTimeUsage id={usage.id} (duration={duration_seconds}s) for user={user.email}, session={sid}")
 
     # ------------------------------------------------------------------
     # receive() – entry point for all incoming WebSocket messages
@@ -1419,6 +1465,7 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         try:
             data = json.loads(text_data)
         except Exception:
+            logger.warning("[VoiceChatConsumer] Received invalid JSON over WebSocket")
             await self.send(json.dumps({"type": "error", "message": "Invalid JSON"}))
             return
 
@@ -1428,6 +1475,7 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         # "stream.stop" – cancel any in-flight streaming task
         # ----------------------------------------------------------------
         if mtype == "stream.stop":
+            logger.info(f"[VoiceChatConsumer] Received stream.stop from user={self.user}, session_id={getattr(self, '_current_conv_session_id', 0)}")
             await self._stop_stream_handler()
             return
 
@@ -1435,7 +1483,7 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         # Default: a new text message to stream a reply for
         # ----------------------------------------------------------------
         text = (data.get("text") or "").strip()
-        session_id = data.get("session_id")
+        session_id = data.get("session_id") or getattr(self, "_current_conv_session_id", None)
 
         if not text:
             await self.send(json.dumps({"type": "error", "message": "text is required"}))
@@ -1445,14 +1493,14 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         if self._stream_task and not self._stream_task.done():
             await self._cancel_stream_task()
 
-        # Reset per-stream state
+        # Reset per-stream state (preserve _current_conv_session_id)
         self._stop_streaming = False
         self._current_partial_text = ""
-        self._current_conv_session_id = 0
 
         # Prepare session and build prompt
         prep = await self._prepare_session_and_prompt(text, session_id)
         if not prep:
+            logger.error(f"[VoiceChatConsumer] Failed to prepare session or loved_one not found (loved_one_id={self.loved_one_id}, session_id={session_id})")
             await self.send(json.dumps({"type": "error", "message": "Failed to prepare session or loved_one not found"}))
             return
 
@@ -1499,13 +1547,13 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         if partial_text and conv_session_id:
             try:
                 await self._save_assistant_message(conv_session_id, partial_text)
-            except Exception:
-                pass
+                logger.info(f"[VoiceChatConsumer] Saved partial assistant message ({len(partial_text)} chars) for session {conv_session_id}")
+            except Exception as exc:
+                logger.error(f"[VoiceChatConsumer] Failed to save partial assistant message for session {conv_session_id}: {exc}", exc_info=True)
 
-        # Reset state so subsequent messages work normally
+        # Reset per-stream state (do NOT clear _current_conv_session_id so talk time is preserved on disconnect)
         self._stop_streaming = False
         self._current_partial_text = ""
-        self._current_conv_session_id = 0
 
         await self.send(json.dumps({"type": "stream.stopped"}))
 
