@@ -287,4 +287,43 @@ class LovedOneCloningTests(TestCase):
 		self.assertTrue(loved_one.avatar.name.endswith("avatar.jpg"))
 
 
+from django.test import TransactionTestCase
+import asyncio
+from voice.consumers import RealtimeVoiceConsumer, VoiceChatConsumer
+from accounts.models import SubscriptionTalkTimeUsage
+from conversations.models import ConversationSession
+
+class TalkTimeTrackingTests(TransactionTestCase):
+	def setUp(self):
+		self.user = User.objects.create_user(email="talker@example.com", password="pass12345", full_name="Talker User")
+		self.plan = Plan.objects.create(name="Talk Plan", price=10.00, talk_time_limit=300)
+		self.subscription = UserSubscription.objects.create(user=self.user, plan=self.plan, is_active=True)
+		self.loved_one = LovedOne.objects.create(user=self.user, name="Grandpa", relationship="Grandfather")
+		self.session = ConversationSession.objects.create(user=self.user, loved_one=self.loved_one, channel=ConversationSession.CHANNEL_VOICE)
+
+	def test_end_conversation_session_creates_talk_time_usage(self):
+		consumer = RealtimeVoiceConsumer()
+		asyncio.run(consumer._db_end_conversation_session(self.session.id, duration_seconds=120))
+		
+		usage = SubscriptionTalkTimeUsage.objects.filter(subscription=self.subscription).first()
+		self.assertIsNotNone(usage)
+		self.assertEqual(usage.duration, 120)
+		self.assertEqual(usage.session, self.session)
+
+	def test_talk_time_limit_check(self):
+		consumer = RealtimeVoiceConsumer()
+		consumer.scope = {"user": self.user}
+		
+		# Before limit reached
+		allowed, msg = asyncio.run(consumer._db_check_talk_time_limit(str(self.user.id)))
+		self.assertTrue(allowed)
+
+		# Exceed limit
+		SubscriptionTalkTimeUsage.objects.create(subscription=self.subscription, session=self.session, duration=350)
+		allowed, msg = asyncio.run(consumer._db_check_talk_time_limit(str(self.user.id)))
+		self.assertFalse(allowed)
+		self.assertIn("Talk time limit of 300 seconds reached", msg)
+
+
+
 

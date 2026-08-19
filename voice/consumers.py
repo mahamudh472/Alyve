@@ -209,6 +209,12 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
         from conversations.models import ConversationSession
 
         user = getattr(self, "scope", {}).get("user", None)
+        if not (user and getattr(user, "is_authenticated", False)):
+            from accounts.models import User
+            try:
+                user = User.objects.filter(id=profile_id).first()
+            except Exception:
+                user = None
 
         s = ConversationSession.objects.create(
             user=user if (user and getattr(user, "is_authenticated", False)) else None,
@@ -223,13 +229,64 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
         return int(s.id)
 
     @database_sync_to_async
-    def _db_end_conversation_session(self, session_id: int):
+    def _db_check_talk_time_limit(self, profile_id: str = "") -> tuple[bool, str]:
+        """
+        Checks if the user has exceeded their plan's talk time limit.
+        Returns (is_allowed, error_message).
+        """
+        user = getattr(self, "scope", {}).get("user", None)
+        if not (user and getattr(user, "is_authenticated", False)):
+            if profile_id:
+                from accounts.models import User
+                try:
+                    user = User.objects.filter(id=profile_id).first()
+                except Exception:
+                    user = None
+
+        if not user or not getattr(user, "is_authenticated", False):
+            return True, ""
+
+        from accounts.models import UserSubscription, SubscriptionTalkTimeUsage
+        from django.db.models import Sum
+
+        subscription = UserSubscription.objects.filter(user=user, is_active=True).select_related("plan").first()
+        if not subscription or not subscription.plan:
+            return True, ""
+
+        limit = subscription.plan.talk_time_limit
+        if limit and limit > 0:
+            used = SubscriptionTalkTimeUsage.objects.filter(subscription=subscription).aggregate(total=Sum("duration"))["total"] or 0
+            if used >= limit:
+                return False, f"Talk time limit of {limit} seconds reached for your subscription plan ({subscription.plan.name})."
+
+        return True, ""
+
+    @database_sync_to_async
+    def _db_end_conversation_session(self, session_id: int, duration_seconds: int = 0):
         from conversations.models import ConversationSession
+        from accounts.models import UserSubscription, SubscriptionTalkTimeUsage
 
         sid = int(session_id or 0)
         if not sid:
             return
-        ConversationSession.objects.filter(id=sid).update(last_activity_at=timezone.now())
+
+        session = ConversationSession.objects.filter(id=sid).first()
+        if not session:
+            return
+
+        session.last_activity_at = timezone.now()
+        session.save(update_fields=["last_activity_at"])
+
+        if duration_seconds > 0:
+            user = session.user
+            if user and getattr(user, "is_authenticated", False):
+                subscription = UserSubscription.objects.filter(user=user, is_active=True).first()
+                if subscription:
+                    SubscriptionTalkTimeUsage.objects.create(
+                        subscription=subscription,
+                        session=session,
+                        duration=duration_seconds,
+                    )
 
     @database_sync_to_async
     def _db_add_message(self, session_id: int, role: str, content: str):
@@ -449,8 +506,9 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
         # track last barge-in time
         self._barge_in_ts: float = 0.0
 
-        # ADDED: conversation session id holder
+        # ADDED: conversation session id holder & session start time
         self._conv_session_id: int = 0
+        self._session_start_time = timezone.now()
 
         await self._send_json({"type": "session.ready"})
 
@@ -462,9 +520,16 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
             t.cancel()
         self._pending_response_task = None
 
-        # ADDED: end DB conversation session
+        duration_seconds = 0
+        if getattr(self, "_session_start_time", None) is not None:
+            duration_seconds = max(0, int((timezone.now() - self._session_start_time).total_seconds()))
+
+        # ADDED: end DB conversation session and record talk time usage
         try:
-            await self._db_end_conversation_session(int(getattr(self, "_conv_session_id", 0) or 0))
+            await self._db_end_conversation_session(
+                int(getattr(self, "_conv_session_id", 0) or 0),
+                duration_seconds=duration_seconds,
+            )
         except Exception:
             pass
 
@@ -530,6 +595,18 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                 await self._send_json({"type": "error", "error": "loved_one_id is required"})
                 return
 
+            # Check talk time limit before starting session
+            allowed, err_msg = await self._db_check_talk_time_limit(self.cfg.profile_id)
+            if not allowed:
+                await self._send_json(
+                    {
+                        "type": "error",
+                        "error": "talk_time_limit_exceeded",
+                        "detail": err_msg,
+                    }
+                )
+                return
+
             self._apply_config(content)
 
             ok = await self._load_persona_from_db(self.cfg.profile_id, self.cfg.loved_one_id)
@@ -552,6 +629,9 @@ class RealtimeVoiceConsumer(AsyncWebsocketConsumer):
                 self._conv_session_id = await self._db_create_conversation_session(self.cfg.profile_id, self.cfg.loved_one_id)
             except Exception:
                 self._conv_session_id = 0
+
+            # Reset session start time to now when voice session starts
+            self._session_start_time = timezone.now()
 
             await self._send_json(
                 {
@@ -1220,6 +1300,7 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         self.loved_one_id = self.scope['url_route']['kwargs'].get('loved_one_id')
         self.user = self.scope.get("user")
         self.profile_id = str(self.user.id) if self.user and self.user.is_authenticated else "default"
+        self._session_start_time = timezone.now()
 
         if not self.loved_one_id:
             await self.close(code=4000)
@@ -1228,6 +1309,14 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         exists = await self._check_loved_one_exists()
         if not exists:
             await self.close(code=4004)
+            return
+
+        # Check talk time limit
+        allowed, err_msg = await self._check_talk_time_limit()
+        if not allowed:
+            await self.accept()
+            await self.send(json.dumps({"type": "error", "error": "talk_time_limit_exceeded", "message": err_msg}))
+            await self.close(code=4003)
             return
 
         # Per-connection streaming state
@@ -1241,8 +1330,19 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         await self.accept()
 
     async def disconnect(self, close_code):
-        """Cancel any in-flight stream task on disconnect."""
+        """Cancel any in-flight stream task and record talk time usage on disconnect."""
         await self._cancel_stream_task()
+
+        duration_seconds = 0
+        if getattr(self, "_session_start_time", None) is not None:
+            duration_seconds = max(0, int((timezone.now() - self._session_start_time).total_seconds()))
+
+        conv_session_id = getattr(self, "_current_conv_session_id", 0)
+        if conv_session_id:
+            try:
+                await self._save_talk_time_usage(conv_session_id, duration_seconds)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1263,6 +1363,53 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
     def _check_loved_one_exists(self):
         from .models import LovedOne
         return LovedOne.objects.filter(id=self.loved_one_id).exists()
+
+    @database_sync_to_async
+    def _check_talk_time_limit(self):
+        if not self.user or not getattr(self.user, "is_authenticated", False):
+            return True, ""
+
+        from accounts.models import UserSubscription, SubscriptionTalkTimeUsage
+        from django.db.models import Sum
+
+        subscription = UserSubscription.objects.filter(user=self.user, is_active=True).select_related("plan").first()
+        if not subscription or not subscription.plan:
+            return True, ""
+
+        limit = subscription.plan.talk_time_limit
+        if limit and limit > 0:
+            used = SubscriptionTalkTimeUsage.objects.filter(subscription=subscription).aggregate(total=Sum("duration"))["total"] or 0
+            if used >= limit:
+                return False, f"Talk time limit of {limit} seconds reached for your subscription plan ({subscription.plan.name})."
+
+        return True, ""
+
+    @database_sync_to_async
+    def _save_talk_time_usage(self, session_id: int, duration_seconds: int):
+        from conversations.models import ConversationSession
+        from accounts.models import UserSubscription, SubscriptionTalkTimeUsage
+
+        sid = int(session_id or 0)
+        if not sid:
+            return
+
+        session = ConversationSession.objects.filter(id=sid).first()
+        if not session:
+            return
+
+        session.last_activity_at = timezone.now()
+        session.save(update_fields=["last_activity_at"])
+
+        if duration_seconds > 0:
+            user = session.user or (self.user if (self.user and getattr(self.user, "is_authenticated", False)) else None)
+            if user:
+                subscription = UserSubscription.objects.filter(user=user, is_active=True).first()
+                if subscription:
+                    SubscriptionTalkTimeUsage.objects.create(
+                        subscription=subscription,
+                        session=session,
+                        duration=duration_seconds,
+                    )
 
     # ------------------------------------------------------------------
     # receive() – entry point for all incoming WebSocket messages
