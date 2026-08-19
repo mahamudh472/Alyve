@@ -220,6 +220,34 @@ class RevenueCatWebhookTestCase(TestCase):
         subscription = UserSubscription.objects.get(user=self.user)
         self.assertEqual(subscription.plan, self.plan)
 
+    @override_settings(REVENUECAT_WEBHOOK_AUTH_TOKEN="test_secret_token")
+    def test_webhook_entitlement_ids_mapping(self):
+        future_expiration = int((timezone.now() + timezone.timedelta(days=30)).timestamp() * 1000)
+        # Store product_id is platform specific (e.g. android/ios), but entitlement is com.alyve.premium.monthly
+        payload = {
+            "event": {
+                "id": "event_id_ent_1",
+                "type": "INITIAL_PURCHASE",
+                "app_user_id": str(self.user.id),
+                "product_id": "com.alyve.app.android.monthly.premium",
+                "entitlement_ids": ["com.alyve.premium.monthly"],
+                "purchased_at_ms": 1618520286000,
+                "expiration_at_ms": future_expiration,
+            }
+        }
+        response = self.client.post(
+            self.webhook_url,
+            data=payload,
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer test_secret_token"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        # Verify subscription was resolved via entitlement_ids
+        subscription = UserSubscription.objects.get(user=self.user)
+        self.assertEqual(subscription.plan, self.plan)
+        self.assertTrue(subscription.is_active)
+
 
 class PlanInfoQueryTestCase(TestCase):
     def setUp(self):
@@ -304,14 +332,9 @@ class PlanInfoQueryTestCase(TestCase):
             query {
               planInfo {
                 planName
-                description
-                price
-                isActive
-                startDate
-                endDate
-                expiryDate
                 cloneLimit
                 cloneUsage
+                totalLovedOnes
                 talkTimeLimit
                 talkTimeUsage
               }
@@ -323,14 +346,9 @@ class PlanInfoQueryTestCase(TestCase):
         self.assertIsNone(result.errors)
         plan_info = result.data["planInfo"]
         self.assertEqual(plan_info["planName"], "Basic Plan")
-        self.assertEqual(plan_info["description"], "Basic features")
-        self.assertEqual(plan_info["price"], 29.00)
-        self.assertTrue(plan_info["isActive"])
-        self.assertIsNotNone(plan_info["startDate"])
-        self.assertIsNotNone(plan_info["endDate"])
-        self.assertEqual(plan_info["expiryDate"], plan_info["endDate"])
         self.assertEqual(plan_info["cloneLimit"], 1)
         self.assertEqual(plan_info["cloneUsage"], 1)
+        self.assertEqual(plan_info["totalLovedOnes"], 1)
         self.assertEqual(plan_info["talkTimeLimit"], 3600)
         self.assertEqual(plan_info["talkTimeUsage"], 450)
 

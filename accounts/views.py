@@ -44,10 +44,27 @@ class RevenueCatWebhookView(APIView):
         app_user_id = event.get("app_user_id")
         product_id = event.get("product_id")
 
-        logger.info(f"Processing RevenueCat event: {event_type} for app_user_id: {app_user_id}, product: {product_id}")
+        # Extract entitlement identifiers (can be list in entitlement_ids or string in entitlement_id)
+        entitlement_ids = event.get("entitlement_ids") or []
+        if isinstance(entitlement_ids, str):
+            entitlement_ids = [entitlement_ids]
+        elif not isinstance(entitlement_ids, list):
+            entitlement_ids = []
 
-        if not app_user_id or not product_id:
-            return Response({"error": "app_user_id and product_id are required"}, status=status.HTTP_400_BAD_REQUEST)
+        entitlement_id = event.get("entitlement_id")
+        if entitlement_id and entitlement_id not in entitlement_ids:
+            entitlement_ids.append(entitlement_id)
+
+        logger.info(
+            f"Processing RevenueCat event: {event_type} for app_user_id: {app_user_id}, "
+            f"product: {product_id}, entitlements: {entitlement_ids}"
+        )
+
+        if not app_user_id or (not product_id and not entitlement_ids):
+            return Response(
+                {"error": "app_user_id and (product_id or entitlement_ids) are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # 3. Locate user
         user = None
@@ -64,15 +81,36 @@ class RevenueCatWebhookView(APIView):
             logger.warning(f"RevenueCat webhook user not found: {app_user_id}")
             return Response({"error": f"User {app_user_id} not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # 4. Locate Plan
-        plan = Plan.objects.filter(revenuecat_product_id=product_id).first()
-        if not plan:
-            # Fallback: look up by plan name (case-insensitive)
+        # 4. Locate Plan (Check by Entitlements first, then Product ID, then Plan Name)
+        plan = None
+
+        # 4.1. Match revenuecat_product_id against entitlement_ids
+        if entitlement_ids:
+            plan = Plan.objects.filter(revenuecat_product_id__in=entitlement_ids).first()
+
+        # 4.2. Match revenuecat_product_id against product_id
+        if not plan and product_id:
+            plan = Plan.objects.filter(revenuecat_product_id=product_id).first()
+
+        # 4.3. Fallback: Match Plan name (case-insensitive) against entitlement_ids
+        if not plan and entitlement_ids:
+            for eid in entitlement_ids:
+                plan = Plan.objects.filter(name__iexact=eid).first()
+                if plan:
+                    break
+
+        # 4.4. Fallback: Match Plan name (case-insensitive) against product_id
+        if not plan and product_id:
             plan = Plan.objects.filter(name__iexact=product_id).first()
 
         if not plan:
-            logger.warning(f"RevenueCat webhook plan not found for product: {product_id}")
-            return Response({"error": f"Plan for product {product_id} not found"}, status=status.HTTP_404_NOT_FOUND)
+            logger.warning(
+                f"RevenueCat webhook plan not found for product: {product_id}, entitlements: {entitlement_ids}"
+            )
+            return Response(
+                {"error": f"Plan not found for product '{product_id}' or entitlements {entitlement_ids}"},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         # 5. Determine start and end dates
         purchased_at_ms = event.get("purchased_at_ms")
