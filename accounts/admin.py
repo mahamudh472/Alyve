@@ -62,8 +62,8 @@ class SiteSettingAdmin(ModelAdmin):
 
 @admin.register(Plan)
 class PlanAdmin(ModelAdmin):
-    list_display = ('name', 'price', 'clone_limit', 'talk_time_limit', 'is_active')
-    search_fields = ('name',)
+    list_display = ('name', 'playstore_product_id', 'app_store_product_id', 'revenuecat_product_id', 'price', 'clone_limit', 'talk_time_limit', 'is_active')
+    search_fields = ('name', 'playstore_product_id', 'app_store_product_id', 'revenuecat_product_id')
     list_filter = ('is_active',)
 
 

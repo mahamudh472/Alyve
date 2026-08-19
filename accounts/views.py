@@ -81,27 +81,37 @@ class RevenueCatWebhookView(APIView):
             logger.warning(f"RevenueCat webhook user not found: {app_user_id}")
             return Response({"error": f"User {app_user_id} not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # 4. Locate Plan (Check by Entitlements first, then Product ID, then Plan Name)
+        # 4. Locate Plan (Check playstore_product_id, app_store_product_id, revenuecat_product_id, then Plan Name)
+        from django.db.models import Q
+
         plan = None
 
-        # 4.1. Match revenuecat_product_id against entitlement_ids
-        if entitlement_ids:
-            plan = Plan.objects.filter(revenuecat_product_id__in=entitlement_ids).first()
+        # 4.1. Match product_id directly against playstore_product_id, app_store_product_id, or revenuecat_product_id
+        if product_id:
+            plan = Plan.objects.filter(
+                Q(playstore_product_id=product_id) |
+                Q(app_store_product_id=product_id) |
+                Q(revenuecat_product_id=product_id)
+            ).first()
 
-        # 4.2. Match revenuecat_product_id against product_id
+        # 4.2. Match entitlement_ids against playstore_product_id, app_store_product_id, or revenuecat_product_id
+        if not plan and entitlement_ids:
+            plan = Plan.objects.filter(
+                Q(playstore_product_id__in=entitlement_ids) |
+                Q(app_store_product_id__in=entitlement_ids) |
+                Q(revenuecat_product_id__in=entitlement_ids)
+            ).first()
+
+        # 4.3. Fallback: Match Plan name (case-insensitive) against product_id
         if not plan and product_id:
-            plan = Plan.objects.filter(revenuecat_product_id=product_id).first()
+            plan = Plan.objects.filter(name__iexact=product_id).first()
 
-        # 4.3. Fallback: Match Plan name (case-insensitive) against entitlement_ids
+        # 4.4. Fallback: Match Plan name (case-insensitive) against entitlement_ids
         if not plan and entitlement_ids:
             for eid in entitlement_ids:
                 plan = Plan.objects.filter(name__iexact=eid).first()
                 if plan:
                     break
-
-        # 4.4. Fallback: Match Plan name (case-insensitive) against product_id
-        if not plan and product_id:
-            plan = Plan.objects.filter(name__iexact=product_id).first()
 
         if not plan:
             logger.warning(

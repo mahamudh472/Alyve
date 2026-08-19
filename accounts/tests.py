@@ -248,6 +248,70 @@ class RevenueCatWebhookTestCase(TestCase):
         self.assertEqual(subscription.plan, self.plan)
         self.assertTrue(subscription.is_active)
 
+    @override_settings(REVENUECAT_WEBHOOK_AUTH_TOKEN="test_secret_token")
+    def test_webhook_playstore_product_id_matching(self):
+        play_plan = Plan.objects.create(
+            name="Play Plan",
+            playstore_product_id="com.alyve.playstore.monthly",
+            price=9.99,
+            clone_limit=2,
+            talk_time_limit=1800
+        )
+        future_expiration = int((timezone.now() + timezone.timedelta(days=30)).timestamp() * 1000)
+        payload = {
+            "event": {
+                "id": "event_play_1",
+                "type": "INITIAL_PURCHASE",
+                "app_user_id": str(self.user.id),
+                "product_id": "com.alyve.playstore.monthly",
+                "purchased_at_ms": 1618520286000,
+                "expiration_at_ms": future_expiration,
+            }
+        }
+        response = self.client.post(
+            self.webhook_url,
+            data=payload,
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer test_secret_token"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        subscription = UserSubscription.objects.get(user=self.user)
+        self.assertEqual(subscription.plan, play_plan)
+        self.assertTrue(subscription.is_active)
+
+    @override_settings(REVENUECAT_WEBHOOK_AUTH_TOKEN="test_secret_token")
+    def test_webhook_app_store_product_id_matching(self):
+        appstore_plan = Plan.objects.create(
+            name="AppStore Plan",
+            app_store_product_id="com.alyve.appstore.monthly",
+            price=14.99,
+            clone_limit=3,
+            talk_time_limit=2400
+        )
+        future_expiration = int((timezone.now() + timezone.timedelta(days=30)).timestamp() * 1000)
+        payload = {
+            "event": {
+                "id": "event_appstore_1",
+                "type": "INITIAL_PURCHASE",
+                "app_user_id": str(self.user.id),
+                "product_id": "com.alyve.appstore.monthly",
+                "purchased_at_ms": 1618520286000,
+                "expiration_at_ms": future_expiration,
+            }
+        }
+        response = self.client.post(
+            self.webhook_url,
+            data=payload,
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer test_secret_token"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        subscription = UserSubscription.objects.get(user=self.user)
+        self.assertEqual(subscription.plan, appstore_plan)
+        self.assertTrue(subscription.is_active)
+
 
 class PlanInfoQueryTestCase(TestCase):
     def setUp(self):

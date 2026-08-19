@@ -105,6 +105,8 @@ class SiteSetting(models.Model):
 class Plan(models.Model):
     name = models.CharField(max_length=100, unique=True)
     revenuecat_product_id = models.CharField(max_length=100, unique=True, blank=True, null=True)
+    playstore_product_id = models.CharField(max_length=150, unique=True, blank=True, null=True)
+    app_store_product_id = models.CharField(max_length=150, unique=True, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     clone_limit = models.IntegerField(default=0)  # Number of cloned voices allowed
