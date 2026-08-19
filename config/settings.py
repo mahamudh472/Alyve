@@ -396,10 +396,15 @@ LOGGING = {
     },
     
     "handlers": {
+        "console": {
+            "level": "INFO",
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
         "file": {
             "level": "INFO",
             "class": "logging.handlers.RotatingFileHandler",
-            "filename": "logs/app.log",
+            "filename": BASE_DIR / "logs" / "app.log",
             "maxBytes": 10 * 1024 * 1024,  # 10 MB
             "backupCount": 5,             # keep last 5 files
             "formatter": "verbose",
@@ -407,7 +412,7 @@ LOGGING = {
         "error_file": {
             "level": "ERROR",
             "class": "logging.handlers.RotatingFileHandler",
-            "filename": "logs/errors.log",
+            "filename": BASE_DIR / "logs" / "errors.log",
             "maxBytes": 10 * 1024 * 1024,  # 10 MB
             "backupCount": 5,
             "formatter": "verbose",
@@ -415,7 +420,7 @@ LOGGING = {
     },
     "loggers": {
         "": {  # root logger
-            "handlers": ["file", "error_file"],
+            "handlers": ["console", "file", "error_file"],
             "level": "INFO",
         },
     },
