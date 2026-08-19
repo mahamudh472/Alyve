@@ -1329,9 +1329,16 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
             await self.close(code=4000)
             return
 
+        if not self.user or not getattr(self.user, "is_authenticated", False):
+            logger.warning(f"[VoiceChatConsumer] Connection rejected: unauthenticated user attempted to connect to loved_one_id={self.loved_one_id}.")
+            await self.accept()
+            await self.send(json.dumps({"type": "error", "error": "unauthenticated", "message": "Authentication required. Please connect with ?token=<jwt>"}))
+            await self.close(code=4001)
+            return
+
         exists = await self._check_loved_one_exists()
         if not exists:
-            logger.warning(f"[VoiceChatConsumer] Connection rejected: loved_one_id={self.loved_one_id} not found.")
+            logger.warning(f"[VoiceChatConsumer] Connection rejected: loved_one_id={self.loved_one_id} not found or does not belong to user={self.user}.")
             await self.close(code=4004)
             return
 
@@ -1353,7 +1360,7 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
         self._current_conv_session_id: int = 0
 
         await self.accept()
-        logger.info(f"[VoiceChatConsumer] WebSocket accepted: loved_one_id={self.loved_one_id}, user={self.user}")
+        logger.info(f"[VoiceChatConsumer] WebSocket accepted: loved_one_id={self.loved_one_id}, user={self.user.email}")
 
     async def disconnect(self, close_code):
         """Cancel any in-flight stream task and record talk time usage on disconnect."""
@@ -1392,7 +1399,10 @@ class VoiceChatConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def _check_loved_one_exists(self):
         from .models import LovedOne
-        return LovedOne.objects.filter(id=self.loved_one_id).exists()
+        qs = LovedOne.objects.filter(id=self.loved_one_id)
+        if self.user and getattr(self.user, "is_authenticated", False):
+            qs = qs.filter(user=self.user)
+        return qs.exists()
 
     @database_sync_to_async
     def _check_talk_time_limit(self):
