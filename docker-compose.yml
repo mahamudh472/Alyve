@@ -27,6 +27,7 @@ services:
     volumes:
       - ./deploy/nginx:/etc/nginx/custom:ro
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
+      - /var/www/certbot:/etc/nginx/certbot:ro
       - ./staticfiles:/app/staticfiles:ro
       - ./media:/app/media:ro
     restart: unless-stopped
